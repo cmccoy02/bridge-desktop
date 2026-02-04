@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react'
-import type { Repository, Language } from '../types'
+import type { Repository } from '../types'
 
 interface RepositoryContextType {
   repositories: Repository[]
@@ -27,11 +27,11 @@ export function RepositoryProvider({ children }: { children: React.ReactNode }) 
     try {
       const repos = await window.bridge.getRepositories()
       // Filter out missing repos
-      const existingRepos = repos.filter(r => r.exists)
+      const existingRepos = repos.filter((r: Repository) => r.exists)
       setRepositories(existingRepos)
 
       // If selected repo no longer exists, deselect it
-      if (selectedRepo && !existingRepos.find(r => r.path === selectedRepo.path)) {
+      if (selectedRepo && !existingRepos.find((r: Repository) => r.path === selectedRepo.path)) {
         setSelectedRepo(null)
       }
     } catch (error) {
@@ -62,7 +62,7 @@ export function RepositoryProvider({ children }: { children: React.ReactNode }) 
 
   const removeRepository = async (path: string) => {
     const updated = await window.bridge.removeRepository(path)
-    setRepositories(updated.filter(r => r.exists))
+    setRepositories(updated.filter((r: Repository) => r.exists))
 
     if (selectedRepo?.path === path) {
       setSelectedRepo(null)

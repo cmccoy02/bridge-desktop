@@ -36,6 +36,8 @@ export interface RepoInfo {
   hasChanges: boolean
   isProtectedBranch: boolean
   defaultBranch: string
+  ahead: number
+  behind: number
 }
 
 export interface PatchBatchConfig {

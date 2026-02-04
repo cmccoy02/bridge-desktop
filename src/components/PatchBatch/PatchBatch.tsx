@@ -18,7 +18,7 @@ export default function PatchBatch() {
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<{ message: string; step: number; total: number } | null>(null)
   const [result, setResult] = useState<{ success: boolean; prUrl?: string | null; error?: string; testsPassed?: boolean } | null>(null)
-  const [branchName, setBranchName] = useState('patch-updates')
+  const [branchName, setBranchName] = useState('bridge-updates')
   const [createPR, setCreatePR] = useState(true)
   const [runTests, setRunTests] = useState(true)
   const [repoInfo, setRepoInfo] = useState<{ branch: string; isProtectedBranch: boolean } | null>(null)
@@ -254,7 +254,7 @@ export default function PatchBatch() {
               className="input"
               value={branchName}
               onChange={e => setBranchName(e.target.value)}
-              placeholder="patch-updates"
+              placeholder="bridge-updates"
               style={{ maxWidth: '300px' }}
             />
           </div>

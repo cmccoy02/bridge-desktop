@@ -9,6 +9,8 @@ export interface RepoInfo {
   hasChanges: boolean
   isProtectedBranch: boolean
   defaultBranch: string
+  ahead: number
+  behind: number
 }
 
 const PROTECTED_BRANCHES = ['main', 'master', 'develop', 'production', 'staging']
@@ -56,14 +58,32 @@ export async function getRepoInfo(repoPath: string): Promise<RepoInfo> {
 
     const isProtectedBranch = PROTECTED_BRANCHES.includes(branch.toLowerCase())
 
-    return { branch, remote, hasChanges, isProtectedBranch, defaultBranch }
+    // Get ahead/behind counts relative to remote tracking branch
+    let ahead = 0
+    let behind = 0
+    try {
+      // First try to get upstream tracking branch
+      const upstream = await runGitCommand(repoPath, `git rev-parse --abbrev-ref ${branch}@{upstream} 2>/dev/null`)
+      if (upstream) {
+        const counts = await runGitCommand(repoPath, `git rev-list --left-right --count ${upstream}...HEAD`)
+        const [behindStr, aheadStr] = counts.split(/\s+/)
+        behind = parseInt(behindStr, 10) || 0
+        ahead = parseInt(aheadStr, 10) || 0
+      }
+    } catch {
+      // No upstream configured or other error - leave as 0
+    }
+
+    return { branch, remote, hasChanges, isProtectedBranch, defaultBranch, ahead, behind }
   } catch (error) {
     return {
       branch: 'unknown',
       remote: null,
       hasChanges: false,
       isProtectedBranch: false,
-      defaultBranch: 'main'
+      defaultBranch: 'main',
+      ahead: 0,
+      behind: 0
     }
   }
 }

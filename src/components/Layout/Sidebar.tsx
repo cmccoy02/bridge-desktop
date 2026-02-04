@@ -1,5 +1,6 @@
+import { useState, useEffect } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { View, Language } from '../../types'
+import type { View, Language, RepoInfo } from '../../types'
 
 interface SidebarProps {
   currentView: View
@@ -16,6 +17,25 @@ const LANGUAGE_COLORS: Record<Language, string> = {
 
 export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
   const { repositories, selectedRepo, selectRepository, addRepository } = useRepositories()
+  const [repoInfoMap, setRepoInfoMap] = useState<Record<string, RepoInfo>>({})
+
+  useEffect(() => {
+    const fetchRepoInfo = async () => {
+      const newInfoMap: Record<string, RepoInfo> = {}
+      for (const repo of repositories) {
+        if (repo.hasGit && repo.exists) {
+          try {
+            const info = await window.bridge.getRepoInfo(repo.path)
+            newInfoMap[repo.path] = info
+          } catch {
+            // Ignore errors
+          }
+        }
+      }
+      setRepoInfoMap(newInfoMap)
+    }
+    fetchRepoInfo()
+  }, [repositories])
 
   const handleImport = async () => {
     const path = await window.bridge.selectDirectory()
@@ -108,25 +128,35 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
           </button>
 
           <div className="repo-list">
-            {repositories.map(repo => (
-              <button
-                key={repo.path}
-                className={`repo-item ${selectedRepo?.path === repo.path ? 'active' : ''}`}
-                onClick={() => selectRepository(repo)}
-                style={{ opacity: repo.exists ? 1 : 0.5 }}
-              >
-                <span
-                  className="repo-dot"
-                  style={{
-                    background: repo.languages?.[0] ? LANGUAGE_COLORS[repo.languages[0]] : LANGUAGE_COLORS.unknown
-                  }}
-                />
-                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{repo.name}</span>
-                {(repo.languages?.length ?? 0) > 1 && (
-                  <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>+{repo.languages!.length - 1}</span>
-                )}
-              </button>
-            ))}
+            {repositories.map(repo => {
+              const info = repoInfoMap[repo.path]
+              const hasSync = info && (info.ahead > 0 || info.behind > 0)
+              return (
+                <button
+                  key={repo.path}
+                  className={`repo-item ${selectedRepo?.path === repo.path ? 'active' : ''}`}
+                  onClick={() => selectRepository(repo)}
+                  style={{ opacity: repo.exists ? 1 : 0.5 }}
+                >
+                  <span
+                    className="repo-dot"
+                    style={{
+                      background: repo.languages?.[0] ? LANGUAGE_COLORS[repo.languages[0]] : LANGUAGE_COLORS.unknown
+                    }}
+                  />
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{repo.name}</span>
+                  {hasSync && (
+                    <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', gap: '4px' }}>
+                      {info.behind > 0 && <span title={`${info.behind} behind`}>↓{info.behind}</span>}
+                      {info.ahead > 0 && <span title={`${info.ahead} ahead`}>↑{info.ahead}</span>}
+                    </span>
+                  )}
+                  {(repo.languages?.length ?? 0) > 1 && (
+                    <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>+{repo.languages!.length - 1}</span>
+                  )}
+                </button>
+              )
+            })}
           </div>
         </div>
       </nav>
