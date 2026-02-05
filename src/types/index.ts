@@ -44,6 +44,8 @@ export interface PatchBatchConfig {
   packages: { name: string; language: Language }[]
   createPR: boolean
   runTests: boolean
+  testCommand?: string
+  testTimeoutMs?: number
   prTitle?: string
   prBody?: string
 }
@@ -53,6 +55,7 @@ export interface PatchBatchResult {
   updatedPackages?: string[]
   failedPackages?: string[]
   prUrl?: string | null
+  branchName?: string
   error?: string
   testsPassed?: boolean
   testOutput?: string

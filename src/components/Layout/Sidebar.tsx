@@ -57,27 +57,6 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
         <div className="nav-section">
           <div className="nav-section-title">Navigation</div>
           <button
-            className={`nav-item ${currentView === 'dashboard' ? 'active' : ''}`}
-            onClick={() => onNavigate('dashboard')}
-          >
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="3" y="3" width="7" height="7" rx="1" />
-              <rect x="14" y="3" width="7" height="7" rx="1" />
-              <rect x="3" y="14" width="7" height="7" rx="1" />
-              <rect x="14" y="14" width="7" height="7" rx="1" />
-            </svg>
-            Dashboard
-          </button>
-          <button
-            className={`nav-item ${currentView === 'files' ? 'active' : ''}`}
-            onClick={() => onNavigate('files')}
-          >
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-            </svg>
-            Files
-          </button>
-          <button
             className={`nav-item ${currentView === 'patch-batch' ? 'active' : ''}`}
             onClick={() => onNavigate('patch-batch')}
           >
@@ -85,35 +64,7 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
               <path d="M21 12a9 9 0 11-9-9" />
               <path d="M21 3v6h-6" />
             </svg>
-            Patch Batch
-          </button>
-          <button
-            className={`nav-item ${currentView === 'cleanup' ? 'active' : ''}`}
-            onClick={() => onNavigate('cleanup')}
-          >
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-            </svg>
-            Cleanup
-          </button>
-          <button
-            className={`nav-item ${currentView === 'scheduler' ? 'active' : ''}`}
-            onClick={() => onNavigate('scheduler')}
-          >
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-            </svg>
-            Scheduler
-          </button>
-          <button
-            className={`nav-item ${currentView === 'security' ? 'active' : ''}`}
-            onClick={() => onNavigate('security')}
-          >
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
-            Security
+            Update Dependencies
           </button>
         </div>
 

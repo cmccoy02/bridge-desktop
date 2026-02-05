@@ -368,6 +368,140 @@ a:hover {
   font-weight: 600;
 }
 
+/* Patch Batch */
+.patch-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.step-guide {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.step-number {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--accent-light);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.config-grid {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.table-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.package-table-wrapper {
+  overflow-x: auto;
+}
+
+.package-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.package-table th {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.package-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.package-table tbody tr {
+  cursor: pointer;
+}
+
+.package-table tbody tr:hover {
+  background: var(--bg-tertiary);
+}
+
+.package-table tbody tr.selected {
+  background: var(--accent-light);
+}
+
+.package-table tbody tr.selected:hover {
+  background: var(--accent-light);
+}
+
+.package-table tbody tr.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.package-table tbody tr.disabled:hover {
+  background: transparent;
+}
+
+.package-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.table-footer {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.output-panel {
+  background: #0f0f0f;
+  color: #e5e5e5;
+  border: 1px solid #1f1f1f;
+  border-radius: var(--radius-md);
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 160px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-mono);
+}
+
+.output-line {
+  white-space: pre-wrap;
+}
+
 /* Input */
 .input {
   width: 100%;

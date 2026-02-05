@@ -33,6 +33,7 @@ declare global {
       runPatchBatch: (config: PatchBatchConfig) => Promise<PatchBatchResult>
       onPatchBatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
       onPatchBatchWarning: (callback: (warning: { message: string; output: string }) => void) => () => void
+      onPatchBatchLog: (callback: (entry: { message: string }) => void) => () => void
       getRepoInfo: (repoPath: string) => Promise<RepoInfo>
       checkProtectedBranch: (repoPath: string) => Promise<boolean>
       getScheduledJobs: () => Promise<ScheduledJob[]>

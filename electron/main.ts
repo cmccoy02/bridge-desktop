@@ -8,15 +8,9 @@ import {
   getPythonOutdated,
   getRubyOutdated,
   getElixirOutdated,
-  updatePythonPackages,
-  updateRubyPackages,
-  updateElixirPackages,
-  getCleanInstallCommand,
-  getTestCommand,
-  getLintCommand,
-  getFilesToCommit,
   Language
 } from './services/languages'
+import { getJsOutdatedPackages, runPatchBatchPipeline } from './services/patchBatch'
 import {
   getScheduledJobs,
   addScheduledJob,
@@ -29,28 +23,14 @@ import {
   ScheduledJob
 } from './services/scheduler'
 import {
-  createBranch,
-  commitChanges,
-  pushBranch,
-  createPullRequest,
   getRepoInfo,
-  isOnProtectedBranch,
-  runTests,
-  runLint,
-  abortChanges,
-  deleteBranch
+  isOnProtectedBranch
 } from './services/git'
 import {
   runSecurityScan,
   generateSecurityFix,
   checkAgenticFixerAvailable
 } from './services/securityScanner'
-import { exec } from 'child_process'
-import { promisify } from 'util'
-import fs from 'fs/promises'
-import * as semver from 'semver'
-
-const execAsync = promisify(exec)
 const store = new Store()
 
 let mainWindow: BrowserWindow | null = null
@@ -194,85 +174,29 @@ ipcMain.handle('get-outdated-packages', async (_, repoPath: string, language?: L
   const languages = language ? [language] : await detectLanguages(repoPath)
   const allPackages: any[] = []
 
+  if (languages.length === 0) {
+    throw new Error('No package.json found - is this a Node.js project?')
+  }
+
   for (const lang of languages) {
     switch (lang) {
       case 'javascript':
-        const jsPackages = await getJsOutdatedPackages(repoPath)
-        allPackages.push(...jsPackages)
+        allPackages.push(...await getJsOutdatedPackages(repoPath))
         break
       case 'python':
-        const pyPackages = await getPythonOutdated(repoPath)
-        allPackages.push(...pyPackages)
+        allPackages.push(...await getPythonOutdated(repoPath))
         break
       case 'ruby':
-        const rbPackages = await getRubyOutdated(repoPath)
-        allPackages.push(...rbPackages)
+        allPackages.push(...await getRubyOutdated(repoPath))
         break
       case 'elixir':
-        const exPackages = await getElixirOutdated(repoPath)
-        allPackages.push(...exPackages)
+        allPackages.push(...await getElixirOutdated(repoPath))
         break
     }
   }
 
   return allPackages
 })
-
-// JavaScript outdated packages helper
-async function getJsOutdatedPackages(repoPath: string) {
-  try {
-    const packageJsonPath = path.join(repoPath, 'package.json')
-    const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8')
-    const packageJson = JSON.parse(packageJsonContent)
-
-    const devDeps = new Set(Object.keys(packageJson.devDependencies || {}))
-
-    let outdatedJson: string
-    try {
-      const { stdout } = await execAsync('npm outdated --json', { cwd: repoPath })
-      outdatedJson = stdout
-    } catch (error: any) {
-      outdatedJson = error.stdout || '{}'
-    }
-
-    const outdated = JSON.parse(outdatedJson || '{}')
-    const packages: any[] = []
-
-    for (const [name, info] of Object.entries(outdated) as [string, any][]) {
-      const current = info.current || '0.0.0'
-      const wanted = info.wanted || current
-      const latest = info.latest || wanted
-
-      const currentParsed = semver.parse(current)
-      const wantedParsed = semver.parse(wanted)
-
-      let hasPatchUpdate = false
-      if (currentParsed && wantedParsed) {
-        hasPatchUpdate = currentParsed.major === wantedParsed.major &&
-                         currentParsed.minor === wantedParsed.minor &&
-                         currentParsed.patch < wantedParsed.patch
-      }
-
-      packages.push({
-        name,
-        current,
-        wanted,
-        latest,
-        type: devDeps.has(name) ? 'devDependencies' : 'dependencies',
-        hasPatchUpdate,
-        language: 'javascript'
-      })
-    }
-
-    return packages.sort((a, b) => {
-      if (a.hasPatchUpdate && !b.hasPatchUpdate) return -1
-      if (!a.hasPatchUpdate && b.hasPatchUpdate) return 1
-      return a.name.localeCompare(b.name)
-    })
-  } catch {
-    return []
-  }
-}
 
 // Run patch batch with full pipeline
 ipcMain.handle('run-patch-batch', async (event, config: {
@@ -281,193 +205,33 @@ ipcMain.handle('run-patch-batch', async (event, config: {
   packages: { name: string; language: Language }[]
   createPR: boolean
   runTests: boolean
+  testCommand?: string
+  testTimeoutMs?: number
   prTitle?: string
   prBody?: string
 }) => {
-  const { repoPath, branchName, packages, createPR, runTests: shouldRunTests, prTitle, prBody } = config
+  const { repoPath, branchName, packages, createPR, runTests: shouldRunTests, prTitle, prBody, testCommand, testTimeoutMs } = config
 
-  const sendProgress = (message: string, step: number, total: number) => {
-    event.sender.send('patch-batch-progress', { message, step, total })
-  }
-
-  const totalSteps = shouldRunTests ? 8 : 6
-  let currentStep = 0
-
-  try {
-    // Step 1: Check branch safety
-    sendProgress('Checking branch safety...', ++currentStep, totalSteps)
-    const repoInfo = await getRepoInfo(repoPath)
-    const originalBranch = repoInfo.branch
-
-    if (repoInfo.hasChanges) {
-      return { success: false, error: 'Repository has uncommitted changes. Please commit or stash first.' }
+  return runPatchBatchPipeline(
+    {
+      repoPath,
+      branchName,
+      packages,
+      createPR,
+      runTests: shouldRunTests,
+      prTitle,
+      prBody,
+      testCommand,
+      testTimeoutMs
+    },
+    {
+      onProgress: (message, step, total) => event.sender.send('patch-batch-progress', { message, step, total }),
+      onLog: (message) => event.sender.send('patch-batch-log', { message }),
+      onWarning: (warning) => event.sender.send('patch-batch-warning', warning)
     }
-
-    // Step 2: Create branch (this handles protected branch check)
-    sendProgress('Creating git branch...', ++currentStep, totalSteps)
-    await createBranch(repoPath, branchName)
-
-    // Step 3: Update packages by language
-    sendProgress('Updating packages...', ++currentStep, totalSteps)
-
-    const byLanguage = new Map<Language, string[]>()
-    for (const pkg of packages) {
-      const list = byLanguage.get(pkg.language) || []
-      list.push(pkg.name)
-      byLanguage.set(pkg.language, list)
-    }
-
-    const allUpdated: string[] = []
-    const allFailed: string[] = []
-
-    for (const [lang, pkgNames] of byLanguage) {
-      let result: { updated: string[]; failed: string[] }
-
-      switch (lang) {
-        case 'javascript':
-          result = await updateJsPackages(repoPath, pkgNames)
-          break
-        case 'python':
-          result = await updatePythonPackages(repoPath, pkgNames)
-          break
-        case 'ruby':
-          result = await updateRubyPackages(repoPath, pkgNames)
-          break
-        case 'elixir':
-          result = await updateElixirPackages(repoPath, pkgNames)
-          break
-        default:
-          result = { updated: [], failed: pkgNames }
-      }
-
-      allUpdated.push(...result.updated)
-      allFailed.push(...result.failed)
-    }
-
-    // Step 4: Run clean install
-    sendProgress('Running clean install...', ++currentStep, totalSteps)
-    const primaryLang = packages[0]?.language || 'javascript'
-    const cleanCmd = getCleanInstallCommand(primaryLang)
-    if (cleanCmd) {
-      await execAsync(cleanCmd, { cwd: repoPath, timeout: 300000 })
-    }
-
-    // Step 5: Run tests if requested
-    let testsPassed = true
-    if (shouldRunTests) {
-      sendProgress('Running tests...', ++currentStep, totalSteps)
-      const testCmd = getTestCommand(primaryLang)
-      if (testCmd) {
-        const testResult = await runTests(repoPath, testCmd)
-        testsPassed = testResult.success
-
-        if (!testsPassed) {
-          // Abort and cleanup
-          sendProgress('Tests failed, reverting changes...', ++currentStep, totalSteps)
-          await abortChanges(repoPath, originalBranch)
-          await deleteBranch(repoPath, branchName)
-          return {
-            success: false,
-            error: 'Tests failed. Changes reverted.',
-            testOutput: testResult.output
-          }
-        }
-      }
-
-      // Run lint
-      sendProgress('Running linter...', ++currentStep, totalSteps)
-      const lintCmd = getLintCommand(primaryLang)
-      if (lintCmd) {
-        const lintResult = await runLint(repoPath, lintCmd)
-        if (!lintResult.success) {
-          // Lint failures are warnings, not blockers
-          event.sender.send('patch-batch-warning', { message: 'Linter found issues', output: lintResult.output })
-        }
-      }
-    }
-
-    // Step 6: Commit changes
-    sendProgress('Committing changes...', ++currentStep, totalSteps)
-    const files = getFilesToCommit(primaryLang)
-    await commitChanges(repoPath, `chore(deps): update ${allUpdated.length} packages to latest patch versions
-
-Updated packages:
-${allUpdated.map(p => `- ${p}`).join('\n')}`, files)
-
-    // Step 7: Push branch
-    sendProgress('Pushing branch...', ++currentStep, totalSteps)
-    await pushBranch(repoPath, branchName)
-
-    // Step 8: Create PR if requested
-    let prUrl: string | null = null
-    if (createPR) {
-      sendProgress('Creating pull request...', ++currentStep, totalSteps)
-      prUrl = await createPullRequest(
-        repoPath,
-        prTitle || `chore(deps): update ${allUpdated.length} packages`,
-        prBody || `## Summary
-Automated patch version updates via Bridge.
-
-### Updated packages
-${allUpdated.map(p => `- ${p}`).join('\n')}
-
-${shouldRunTests ? '### Checks\n- [x] Tests passed\n- [x] Lint checked' : ''}`
-      )
-    }
-
-    return {
-      success: true,
-      updatedPackages: allUpdated,
-      failedPackages: allFailed,
-      prUrl,
-      testsPassed
-    }
-  } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    }
-  }
+  )
 })
 
-// JavaScript package update helper
-async function updateJsPackages(repoPath: string, packages: string[]) {
-  const updated: string[] = []
-  const failed: string[] = []
-
-  const packageJsonPath = path.join(repoPath, 'package.json')
-  const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8')
-  const packageJson = JSON.parse(packageJsonContent)
-
-  const outdated = await getJsOutdatedPackages(repoPath)
-  const outdatedMap = new Map(outdated.map((p: any) => [p.name, p]))
-
-  for (const pkgName of packages) {
-    const pkg = outdatedMap.get(pkgName)
-    if (!pkg || !pkg.hasPatchUpdate) {
-      failed.push(pkgName)
-      continue
-    }
-
-    if (packageJson.dependencies?.[pkgName]) {
-      const currentVersion = packageJson.dependencies[pkgName]
-      const prefix = currentVersion.match(/^[^0-9]*/)?.[0] || '^'
-      packageJson.dependencies[pkgName] = `${prefix}${pkg.wanted}`
-      updated.push(pkgName)
-    } else if (packageJson.devDependencies?.[pkgName]) {
-      const currentVersion = packageJson.devDependencies[pkgName]
-      const prefix = currentVersion.match(/^[^0-9]*/)?.[0] || '^'
-      packageJson.devDependencies[pkgName] = `${prefix}${pkg.wanted}`
-      updated.push(pkgName)
-    } else {
-      failed.push(pkgName)
-    }
-  }
-
-  await fs.writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\n')
-
-  return { updated, failed }
-}
 
 // Git info
 ipcMain.handle('get-repo-info', async (_, repoPath: string) => {

@@ -1,14 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { OutdatedPackage, Language } from '../../types'
-
-const LANGUAGE_LABELS: Record<Language, string> = {
-  javascript: 'JS',
-  python: 'Py',
-  ruby: 'Rb',
-  elixir: 'Ex',
-  unknown: '?'
-}
+import type { OutdatedPackage } from '../../types'
 
 export default function PatchBatch() {
   const { selectedRepo } = useRepositories()
@@ -17,53 +9,118 @@ export default function PatchBatch() {
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<{ message: string; step: number; total: number } | null>(null)
-  const [result, setResult] = useState<{ success: boolean; prUrl?: string | null; error?: string; testsPassed?: boolean } | null>(null)
-  const [branchName, setBranchName] = useState('bridge-updates')
+  const [result, setResult] = useState<{
+    success: boolean
+    prUrl?: string | null
+    branchName?: string
+    error?: string
+    testsPassed?: boolean
+  } | null>(null)
+  const [branchName, setBranchName] = useState('bridge-update-deps')
   const [createPR, setCreatePR] = useState(true)
   const [runTests, setRunTests] = useState(true)
   const [repoInfo, setRepoInfo] = useState<{ branch: string; isProtectedBranch: boolean } | null>(null)
+  const [outputLines, setOutputLines] = useState<string[]>([])
+  const [testCommand, setTestCommand] = useState('')
+  const [testCommandDetected, setTestCommandDetected] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  const getPackageKey = (pkg: OutdatedPackage) => `${pkg.language}:${pkg.name}`
 
   useEffect(() => {
     if (selectedRepo) {
       loadOutdatedPackages()
       loadRepoInfo()
+      detectTestCommand()
     }
   }, [selectedRepo])
 
   useEffect(() => {
-    if (running) {
-      const cleanup = window.bridge.onPatchBatchProgress(setProgress)
-      return cleanup
+    const cleanupProgress = window.bridge.onPatchBatchProgress(setProgress)
+    const cleanupLog = window.bridge.onPatchBatchLog(({ message }) => {
+      setOutputLines(prev => [...prev, message])
+    })
+    const cleanupWarning = window.bridge.onPatchBatchWarning(({ message, output }) => {
+      const lines = output ? output.split(/\r?\n/).filter(line => line.trim()) : []
+      setOutputLines(prev => [...prev, `WARN: ${message}`, ...lines])
+    })
+
+    return () => {
+      cleanupProgress()
+      cleanupLog()
+      cleanupWarning()
     }
-  }, [running])
+  }, [])
 
   const loadRepoInfo = async () => {
     if (!selectedRepo) return
-    const info = await window.bridge.getRepoInfo(selectedRepo.path)
-    setRepoInfo(info)
+    try {
+      const info = await window.bridge.getRepoInfo(selectedRepo.path)
+      setRepoInfo(info)
+    } catch {
+      setRepoInfo(null)
+    }
   }
 
-  const loadOutdatedPackages = async () => {
+  const detectTestCommand = async () => {
+    if (!selectedRepo) return
+    try {
+      const [packageJsonRaw, files] = await Promise.all([
+        window.bridge.readFile(`${selectedRepo.path}/package.json`),
+        window.bridge.readDirectory(selectedRepo.path)
+      ])
+
+      const packageJson = JSON.parse(packageJsonRaw)
+      const hasTestScript = Boolean(packageJson?.scripts?.test && String(packageJson.scripts.test).trim())
+
+      if (!hasTestScript) {
+        setTestCommand('')
+        setTestCommandDetected(false)
+        return
+      }
+
+      const fileNames = new Set(files.map(file => file.name))
+      let packageManager = 'npm'
+      if (fileNames.has('pnpm-lock.yaml')) {
+        packageManager = 'pnpm'
+      } else if (fileNames.has('yarn.lock')) {
+        packageManager = 'yarn'
+      }
+
+      setTestCommand(`${packageManager} test`)
+      setTestCommandDetected(true)
+    } catch {
+      setTestCommand('')
+      setTestCommandDetected(false)
+    }
+  }
+
+  const loadOutdatedPackages = async (options?: { preserveResult?: boolean }) => {
     if (!selectedRepo) return
 
     setLoading(true)
-    setResult(null)
+    if (!options?.preserveResult) {
+      setResult(null)
+    }
+    setLoadError(null)
     try {
       const outdated = await window.bridge.getOutdatedPackages(selectedRepo.path)
       setPackages(outdated)
 
-      const patchPackages = outdated.filter(p => p.hasPatchUpdate).map(p => `${p.language}:${p.name}`)
+      const patchPackages = outdated.filter(p => p.hasPatchUpdate).map(getPackageKey)
       setSelectedPackages(new Set(patchPackages))
     } catch (error) {
-      console.error('Failed to get outdated packages:', error)
+      const message = error instanceof Error ? error.message : 'Failed to load outdated packages'
+      setLoadError(message)
+      setPackages([])
+      setSelectedPackages(new Set())
     } finally {
       setLoading(false)
     }
   }
 
-  const getPackageKey = (pkg: OutdatedPackage) => `${pkg.language}:${pkg.name}`
-
   const togglePackage = (pkg: OutdatedPackage) => {
+    if (!pkg.hasPatchUpdate) return
     const key = getPackageKey(pkg)
     const next = new Set(selectedPackages)
     if (next.has(key)) {
@@ -74,7 +131,7 @@ export default function PatchBatch() {
     setSelectedPackages(next)
   }
 
-  const selectAllPatch = () => {
+  const selectAll = () => {
     const patchPackages = packages.filter(p => p.hasPatchUpdate).map(getPackageKey)
     setSelectedPackages(new Set(patchPackages))
   }
@@ -86,9 +143,28 @@ export default function PatchBatch() {
   const runPatchBatch = async () => {
     if (!selectedRepo || selectedPackages.size === 0) return
 
+    if (!selectedRepo.hasGit) {
+      setResult({
+        success: false,
+        error: "Git not initialized - run 'git init' first."
+      })
+      return
+    }
+
+    const isJavascriptRepo = (selectedRepo.languages ?? []).includes('javascript')
+    if (runTests && isJavascriptRepo && testCommand.trim().length === 0) {
+      setResult({
+        success: false,
+        error: "No test script found - add one to package.json or uncheck 'Run tests'.",
+        testsPassed: false
+      })
+      return
+    }
+
     setRunning(true)
     setProgress(null)
     setResult(null)
+    setOutputLines([])
 
     try {
       const packagesToUpdate = packages
@@ -101,6 +177,7 @@ export default function PatchBatch() {
         packages: packagesToUpdate,
         createPR,
         runTests,
+        testCommand: testCommand.trim() || undefined,
         prTitle: `chore(deps): update ${packagesToUpdate.length} packages to latest patch versions`,
         prBody: `## Summary\nAutomated patch version updates via Bridge.\n\n### Updated packages\n${packagesToUpdate.map(p => `- ${p.name} (${p.language})`).join('\n')}`
       })
@@ -108,7 +185,7 @@ export default function PatchBatch() {
       setResult(result)
 
       if (result.success) {
-        await loadOutdatedPackages()
+        await loadOutdatedPackages({ preserveResult: true })
         await loadRepoInfo()
       }
     } catch (error) {
@@ -121,8 +198,6 @@ export default function PatchBatch() {
       setProgress(null)
     }
   }
-
-  const patchUpdatesCount = packages.filter(p => p.hasPatchUpdate).length
 
   if (!selectedRepo) {
     return (
@@ -145,20 +220,36 @@ export default function PatchBatch() {
           <line x1="12" y1="8" x2="12" y2="12" />
           <line x1="12" y1="16" x2="12.01" y2="16" />
         </svg>
-        <h3 className="empty-state-title">No supported package manager</h3>
-        <p className="empty-state-desc">This repository doesn't have package.json, requirements.txt, Gemfile, or mix.exs</p>
+        <h3 className="empty-state-title">No package.json found</h3>
+        <p className="empty-state-desc">Is this a Node.js project?</p>
       </div>
     )
+  }
+
+  const patchUpdatesCount = packages.filter(p => p.hasPatchUpdate).length
+  const isJavascriptRepo = (selectedRepo.languages ?? []).includes('javascript')
+  const runButtonLabel = () => {
+    if (running) {
+      const message = progress?.message?.toLowerCase() || ''
+      if (message.includes('test')) return 'Running tests...'
+      if (message.includes('pull request') || message.includes('pr')) return 'Creating PR...'
+      if (message.includes('commit')) return 'Committing updates...'
+      return progress?.message || 'Running update...'
+    }
+
+    if (selectedPackages.size === 0) return 'Select packages to update'
+
+    return `Update ${selectedPackages.size} Package${selectedPackages.size === 1 ? '' : 's'}`
   }
 
   return (
     <div className="fade-in">
       <div style={{ marginBottom: '24px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+        <div className="patch-header">
           <div>
-            <h2 style={{ marginBottom: '4px' }}>Patch Batch</h2>
+            <h2 style={{ marginBottom: '4px' }}>Update Dependencies</h2>
             <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
-              Update packages to their latest patch versions safely.
+              Point Bridge at a repo, review patch updates, run tests, and create a clean PR.
             </p>
           </div>
           <button
@@ -176,6 +267,29 @@ export default function PatchBatch() {
           </button>
         </div>
 
+        <div className="step-guide">
+          <div className="step-item">
+            <span className="step-number">1</span>
+            <span>Select Repository</span>
+          </div>
+          <div className="step-item">
+            <span className="step-number">2</span>
+            <span>Review Outdated Packages</span>
+          </div>
+          <div className="step-item">
+            <span className="step-number">3</span>
+            <span>Run Update (with tests)</span>
+          </div>
+        </div>
+
+        {!selectedRepo.hasGit && (
+          <div className="card" style={{ marginBottom: '16px', borderColor: 'var(--error)', background: 'rgba(239, 68, 68, 0.1)' }}>
+            <div style={{ color: 'var(--error)', fontWeight: 500 }}>
+              Git not initialized - run 'git init' first.
+            </div>
+          </div>
+        )}
+
         {repoInfo?.isProtectedBranch && (
           <div className="card" style={{ marginBottom: '16px', borderColor: 'var(--warning)', background: 'rgba(245, 158, 11, 0.1)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--warning)' }}>
@@ -186,6 +300,12 @@ export default function PatchBatch() {
               </svg>
               <span>You're on <strong>{repoInfo.branch}</strong> (protected). Bridge will create a new branch automatically.</span>
             </div>
+          </div>
+        )}
+
+        {loadError && (
+          <div className="card" style={{ marginBottom: '16px', borderColor: 'var(--error)', background: 'rgba(239, 68, 68, 0.1)' }}>
+            <div style={{ color: 'var(--error)' }}>{loadError}</div>
           </div>
         )}
 
@@ -200,14 +320,9 @@ export default function PatchBatch() {
           >
             {result.success ? (
               <div>
-                <div style={{ fontWeight: 500, marginBottom: '8px', color: 'var(--success)' }}>
-                  Patch update completed successfully!
+                <div style={{ fontWeight: 600, marginBottom: '8px', color: 'var(--success)' }}>
+                  {result.prUrl ? '✓ PR Created Successfully' : `✓ Updates committed to branch '${result.branchName}'`}
                 </div>
-                {result.testsPassed && (
-                  <div style={{ fontSize: '13px', marginBottom: '8px', color: 'var(--text-secondary)' }}>
-                    All tests passed
-                  </div>
-                )}
                 {result.prUrl && (
                   <div style={{ fontSize: '13px' }}>
                     Pull request created:{' '}
@@ -219,7 +334,9 @@ export default function PatchBatch() {
               </div>
             ) : (
               <div style={{ color: 'var(--error)' }}>
-                <div style={{ fontWeight: 500, marginBottom: '4px' }}>Update failed</div>
+                <div style={{ fontWeight: 600, marginBottom: '4px' }}>
+                  {result.testsPassed === false ? '✗ Tests Failed - No PR created' : 'Update failed'}
+                </div>
                 <div style={{ fontSize: '13px' }}>{result.error}</div>
               </div>
             )}
@@ -254,12 +371,12 @@ export default function PatchBatch() {
               className="input"
               value={branchName}
               onChange={e => setBranchName(e.target.value)}
-              placeholder="bridge-updates"
+              placeholder="bridge-update-deps"
               style={{ maxWidth: '300px' }}
             />
           </div>
 
-          <div style={{ display: 'flex', gap: '24px' }}>
+          <div className="config-grid">
             <label className="checkbox-wrapper">
               <div
                 className={`checkbox ${createPR ? 'checked' : ''}`}
@@ -285,13 +402,42 @@ export default function PatchBatch() {
                   </svg>
                 )}
               </div>
-              <span className="checkbox-label">Run tests before PR</span>
+              <span className="checkbox-label">Run tests before creating PR</span>
             </label>
+          </div>
+
+          <div>
+            <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+              Test command
+            </label>
+            <input
+              type="text"
+              className="input"
+              value={testCommand}
+              onChange={e => {
+                setTestCommand(e.target.value)
+                if (testCommandDetected) {
+                  setTestCommandDetected(false)
+                }
+              }}
+              placeholder="npm test"
+              disabled={!runTests}
+            />
+            {runTests && testCommandDetected && (
+              <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                Detected from package.json - will run: {testCommand}
+              </div>
+            )}
+            {runTests && isJavascriptRepo && !testCommandDetected && (
+              <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--warning)' }}>
+                No test script found - add one to package.json or uncheck 'Run tests'.
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" style={{ marginBottom: '24px' }}>
         <div className="card-header">
           <div>
             <h3 className="card-title">Outdated Packages</h3>
@@ -301,12 +447,12 @@ export default function PatchBatch() {
               </span>
             )}
           </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button className="btn btn-ghost btn-sm" onClick={selectAllPatch}>
-              Select patch updates
+          <div className="table-actions">
+            <button className="btn btn-ghost btn-sm" onClick={selectAll}>
+              Select All
             </button>
             <button className="btn btn-ghost btn-sm" onClick={clearSelection}>
-              Clear
+              Deselect All
             </button>
           </div>
         </div>
@@ -324,69 +470,70 @@ export default function PatchBatch() {
             <div>All packages are up to date!</div>
           </div>
         ) : (
-          <div className="package-list">
-            {packages.map(pkg => {
-              const key = getPackageKey(pkg)
-              return (
-                <div
-                  key={key}
-                  className={`package-item ${selectedPackages.has(key) ? 'selected' : ''}`}
-                  onClick={() => pkg.hasPatchUpdate && togglePackage(pkg)}
-                  style={{ opacity: pkg.hasPatchUpdate ? 1 : 0.5, cursor: pkg.hasPatchUpdate ? 'pointer' : 'default' }}
-                >
-                  <div
-                    className={`checkbox ${selectedPackages.has(key) ? 'checked' : ''}`}
-                    style={{ pointerEvents: 'none' }}
-                  >
-                    {selectedPackages.has(key) && (
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
-                        <polyline points="20 6 9 17 4 12" />
-                      </svg>
-                    )}
-                  </div>
-                  <div className="package-info">
-                    <div className="package-name">{pkg.name}</div>
-                    <div className="package-versions">
-                      <span>{pkg.current}</span>
-                      <span className="version-arrow">→</span>
-                      <span className="version-new">{pkg.wanted}</span>
-                      {pkg.latest !== pkg.wanted && (
-                        <>
-                          <span style={{ color: 'var(--text-tertiary)' }}>|</span>
-                          <span style={{ color: 'var(--text-tertiary)' }}>latest: {pkg.latest}</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  <span className="badge" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', fontSize: '10px' }}>
-                    {LANGUAGE_LABELS[pkg.language]}
-                  </span>
-                  <span className={`badge ${pkg.hasPatchUpdate ? 'badge-success' : 'badge-warning'}`}>
-                    {pkg.hasPatchUpdate ? 'patch' : 'minor/major'}
-                  </span>
-                  <span className="badge" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
-                    {pkg.type === 'devDependencies' ? 'dev' : 'prod'}
-                  </span>
-                </div>
-              )
-            })}
+          <div className="package-table-wrapper">
+            <table className="package-table">
+              <thead>
+                <tr>
+                  <th />
+                  <th>Package Name</th>
+                  <th>Current</th>
+                  <th>Latest</th>
+                  <th>Type</th>
+                </tr>
+              </thead>
+              <tbody>
+                {packages.map(pkg => {
+                  const key = getPackageKey(pkg)
+                  const isSelected = selectedPackages.has(key)
+                  const latestDisplay = pkg.hasPatchUpdate ? pkg.wanted : pkg.latest
+                  return (
+                    <tr
+                      key={key}
+                      className={`${pkg.hasPatchUpdate ? '' : 'disabled'} ${isSelected ? 'selected' : ''}`}
+                      onClick={() => togglePackage(pkg)}
+                    >
+                      <td>
+                        <div className={`checkbox ${isSelected ? 'checked' : ''}`}>
+                          {isSelected && (
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="package-name-cell">
+                          <div className="package-name">{pkg.name}</div>
+                          {!pkg.hasPatchUpdate && (
+                            <span className="badge badge-warning">minor/major</span>
+                          )}
+                        </div>
+                      </td>
+                      <td>{pkg.current}</td>
+                      <td className={pkg.hasPatchUpdate ? 'version-new' : ''}>{latestDisplay}</td>
+                      <td>{pkg.type === 'devDependencies' ? 'devDep' : 'dep'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         )}
 
         {packages.length > 0 && (
-          <div style={{ marginTop: '20px', paddingTop: '20px', borderTop: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="table-footer">
             <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
-              {selectedPackages.size} package{selectedPackages.size !== 1 ? 's' : ''} selected
+              {selectedPackages.size} package{selectedPackages.size !== 1 ? 's' : ''} selected for update
             </span>
             <button
               className="btn btn-primary"
               onClick={runPatchBatch}
-              disabled={selectedPackages.size === 0 || running}
+              disabled={selectedPackages.size === 0 || running || !selectedRepo.hasGit}
             >
               {running ? (
                 <>
                   <div className="spinner" style={{ width: '14px', height: '14px', borderTopColor: '#000' }} />
-                  Running...
+                  {runButtonLabel()}
                 </>
               ) : (
                 <>
@@ -394,12 +541,27 @@ export default function PatchBatch() {
                     <path d="M21 12a9 9 0 11-9-9" />
                     <path d="M21 3v6h-6" />
                   </svg>
-                  Run Patch Batch
+                  {runButtonLabel()}
                 </>
               )}
             </button>
           </div>
         )}
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h3 className="card-title">Live Output</h3>
+        </div>
+        <div className="output-panel">
+          {outputLines.length === 0 ? (
+            <div style={{ color: 'var(--text-tertiary)' }}>No output yet. Run an update to see progress here.</div>
+          ) : (
+            outputLines.map((line, index) => (
+              <div key={`${line}-${index}`} className="output-line">{line}</div>
+            ))
+          )}
+        </div>
       </div>
     </div>
   )

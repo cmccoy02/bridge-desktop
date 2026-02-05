@@ -6,13 +6,8 @@ interface HeaderProps {
   currentView: View
 }
 
-const viewTitles: Record<View, string> = {
-  dashboard: 'Dashboard',
-  files: 'File Browser',
-  'patch-batch': 'Patch Batch',
-  cleanup: 'Cleanup',
-  scheduler: 'Scheduler',
-  security: 'Security Scanner'
+const viewTitles: Partial<Record<View, string>> = {
+  'patch-batch': 'Update Dependencies'
 }
 
 export default function Header({ currentView }: HeaderProps) {
@@ -22,7 +17,12 @@ export default function Header({ currentView }: HeaderProps) {
   return (
     <header className="app-header">
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-        <h1 style={{ fontSize: '18px', fontWeight: 600 }}>{viewTitles[currentView]}</h1>
+        <h1 style={{ fontSize: '18px', fontWeight: 600 }}>
+          {viewTitles[currentView] || 'Update Dependencies'}
+        </h1>
+        <span className="badge" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', fontSize: '11px' }}>
+          v0.1.0-demo
+        </span>
         {selectedRepo && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span className="badge badge-accent">{selectedRepo.name}</span>

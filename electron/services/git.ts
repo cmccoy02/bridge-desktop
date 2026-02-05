@@ -167,16 +167,63 @@ export async function createPullRequest(
   return result
 }
 
-export async function runTests(repoPath: string, command: string): Promise<{ success: boolean; output: string }> {
+function hasPositiveTestSignal(output: string): boolean {
+  const patterns = [
+    /\b\d+\s+passing\b/i,
+    /\btests?\s*:\s*\d+\s+passed\b/i,
+    /\bpassed\s+\d+\s+tests?\b/i,
+    /\ball\s+tests\s+passed\b/i,
+    /\bPASS\b/
+  ]
+  return patterns.some(pattern => pattern.test(output))
+}
+
+function hasFailureSignal(output: string): boolean {
+  const countPatterns = [
+    /\b(\d+)\s+failing\b/i,
+    /\b(\d+)\s+failed\b/i
+  ]
+  for (const pattern of countPatterns) {
+    const match = output.match(pattern)
+    if (match && parseInt(match[1], 10) > 0) {
+      return true
+    }
+  }
+
+  return /\bFAIL\b/.test(output)
+}
+
+export async function runTests(
+  repoPath: string,
+  command: string,
+  options: { timeoutMs?: number } = {}
+): Promise<{ success: boolean; output: string; reason?: string; timedOut?: boolean }> {
+  const timeoutMs = options.timeoutMs ?? 300000
+
   try {
     const { stdout, stderr } = await execAsync(command, {
       cwd: repoPath,
-      timeout: 300000, // 5 min timeout for tests
+      timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024
     })
-    return { success: true, output: stdout + stderr }
+    const output = `${stdout}${stderr}`
+    const hasFailure = hasFailureSignal(output)
+    const hasPass = hasPositiveTestSignal(output)
+    const success = !hasFailure && hasPass
+    return {
+      success,
+      output,
+      reason: success ? undefined : 'Tests did not report a passing result.'
+    }
   } catch (error: any) {
-    return { success: false, output: error.stdout + error.stderr || error.message }
+    const output = `${error.stdout || ''}${error.stderr || ''}` || error.message
+    const timedOut = Boolean(error.killed || error.signal === 'SIGTERM')
+    return {
+      success: false,
+      output,
+      timedOut,
+      reason: timedOut ? 'Test command timed out.' : 'Test command failed.'
+    }
   }
 }
 

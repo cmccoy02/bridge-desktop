@@ -199,6 +199,11 @@ contextBridge.exposeInMainWorld('bridge', {
     return () => ipcRenderer.removeAllListeners('patch-batch-warning')
   },
 
+  onPatchBatchLog: (callback: (entry: { message: string }) => void) => {
+    ipcRenderer.on('patch-batch-log', (_, entry) => callback(entry))
+    return () => ipcRenderer.removeAllListeners('patch-batch-log')
+  },
+
   // Git
   getRepoInfo: (repoPath: string): Promise<RepoInfo> =>
     ipcRenderer.invoke('get-repo-info', repoPath),
