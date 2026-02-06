@@ -23,6 +23,10 @@ dist/
 npm-debug.log*
 yarn-debug.log*
 
+# Release artifacts
+*.dmg
+*.blockmap
+
 # TypeScript
 *.tsbuildinfo
 
@@ -48,3 +52,6 @@ venv/
 *.tmp
 *.temp
 .cache/
+
+# Local sandbox repo (not committed)
+sandbox/

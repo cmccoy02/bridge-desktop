@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { OutdatedPackage } from '../../types'
+import type { OutdatedPackage, SecurityPatchResult } from '../../types'
+import Scheduler from '../Scheduler/Scheduler'
 
 export default function PatchBatch() {
   const { selectedRepo } = useRepositories()
@@ -24,6 +25,11 @@ export default function PatchBatch() {
   const [testCommand, setTestCommand] = useState('')
   const [testCommandDetected, setTestCommandDetected] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [showScheduler, setShowScheduler] = useState(false)
+  const [securityRunning, setSecurityRunning] = useState(false)
+  const [securityProgress, setSecurityProgress] = useState<{ message: string; step: number; total: number } | null>(null)
+  const [securityResult, setSecurityResult] = useState<SecurityPatchResult | null>(null)
+  const [securityLogs, setSecurityLogs] = useState<string[]>([])
 
   const getPackageKey = (pkg: OutdatedPackage) => `${pkg.language}:${pkg.name}`
 
@@ -44,11 +50,17 @@ export default function PatchBatch() {
       const lines = output ? output.split(/\r?\n/).filter(line => line.trim()) : []
       setOutputLines(prev => [...prev, `WARN: ${message}`, ...lines])
     })
+    const cleanupSecurityProgress = window.bridge.onSecurityPatchProgress(setSecurityProgress)
+    const cleanupSecurityLog = window.bridge.onSecurityPatchLog(({ message }) => {
+      setSecurityLogs(prev => [...prev, message])
+    })
 
     return () => {
       cleanupProgress()
       cleanupLog()
       cleanupWarning()
+      cleanupSecurityProgress()
+      cleanupSecurityLog()
     }
   }, [])
 
@@ -64,6 +76,12 @@ export default function PatchBatch() {
 
   const detectTestCommand = async () => {
     if (!selectedRepo) return
+    const primaryLang = selectedRepo.languages?.[0] || 'javascript'
+    const defaultTestCommands: Record<string, string> = {
+      python: 'pytest',
+      ruby: 'bundle exec rspec',
+      elixir: 'mix test'
+    }
     try {
       const [packageJsonRaw, files] = await Promise.all([
         window.bridge.readFile(`${selectedRepo.path}/package.json`),
@@ -90,8 +108,13 @@ export default function PatchBatch() {
       setTestCommand(`${packageManager} test`)
       setTestCommandDetected(true)
     } catch {
-      setTestCommand('')
-      setTestCommandDetected(false)
+      if (defaultTestCommands[primaryLang]) {
+        setTestCommand(defaultTestCommands[primaryLang])
+        setTestCommandDetected(true)
+      } else {
+        setTestCommand('')
+        setTestCommandDetected(false)
+      }
     }
   }
 
@@ -199,6 +222,42 @@ export default function PatchBatch() {
     }
   }
 
+  const runSecurityPatch = async () => {
+    if (!selectedRepo) return
+
+    setSecurityRunning(true)
+    setSecurityProgress(null)
+    setSecurityResult(null)
+    setSecurityLogs([])
+
+    try {
+      const result = await window.bridge.runSecurityPatch({
+        repoPath: selectedRepo.path,
+        branchName: `bridge-security-patch-${Date.now()}`,
+        createPR,
+        runTests,
+        testCommand: testCommand.trim() || undefined
+      })
+
+      setSecurityResult(result)
+
+      if (result.success) {
+        await loadOutdatedPackages({ preserveResult: true })
+        await loadRepoInfo()
+      }
+    } catch (error) {
+      setSecurityResult({
+        success: false,
+        updatedPackages: [],
+        failedPackages: [],
+        error: error instanceof Error ? error.message : 'Security patch failed'
+      })
+    } finally {
+      setSecurityRunning(false)
+      setSecurityProgress(null)
+    }
+  }
+
   if (!selectedRepo) {
     return (
       <div className="empty-state fade-in">
@@ -254,7 +313,7 @@ export default function PatchBatch() {
           </div>
           <button
             className="btn btn-secondary btn-sm"
-            onClick={loadOutdatedPackages}
+            onClick={() => loadOutdatedPackages()}
             disabled={loading}
           >
             {loading ? <div className="spinner" style={{ width: '14px', height: '14px' }} /> : (
@@ -309,6 +368,63 @@ export default function PatchBatch() {
           </div>
         )}
 
+        <div className="card" style={{ marginBottom: '16px' }}>
+          <div className="card-header">
+            <h3 className="card-title">Security Vulnerability Auto-Patcher</h3>
+            <button className="btn btn-primary btn-sm" onClick={runSecurityPatch} disabled={securityRunning || !selectedRepo.hasGit}>
+              {securityRunning ? 'Patching...' : 'Patch High/Critical'}
+            </button>
+          </div>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '12px' }}>
+            Runs npm audit, updates high/critical vulnerabilities one-by-one, and creates a PR when tests pass.
+          </p>
+
+          {securityProgress && (
+            <div style={{ marginBottom: '12px' }}>
+              <div style={{ fontSize: '13px', marginBottom: '6px' }}>{securityProgress.message}</div>
+              <div className="progress-bar">
+                <div className="progress-fill" style={{ width: `${(securityProgress.step / securityProgress.total) * 100}%` }} />
+              </div>
+            </div>
+          )}
+
+          {securityResult && (
+            <div className="card" style={{
+              borderColor: securityResult.success ? 'var(--success)' : 'var(--error)',
+              background: securityResult.success ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+              padding: '12px'
+            }}>
+              {securityResult.success ? (
+                <div style={{ color: 'var(--success)' }}>
+                  Patched {securityResult.updatedPackages.length} packages.{securityResult.prUrl ? ' PR created.' : ''}
+                </div>
+              ) : (
+                <div style={{ color: 'var(--error)' }}>
+                  {securityResult.error || 'Security patch failed.'}
+                </div>
+              )}
+              {securityResult.prUrl && (
+                <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                  PR: {securityResult.prUrl}
+                </div>
+              )}
+              {securityResult.failedPackages.length > 0 && (
+                <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                  Failed: {securityResult.failedPackages.join(', ')}
+                </div>
+              )}
+            </div>
+          )}
+
+          {securityLogs.length > 0 && (
+            <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+              {securityLogs.slice(-4).map((line, i) => (
+                <div key={`${line}-${i}`}>{line}</div>
+              ))}
+            </div>
+          )}
+        </div>
+
         {result && (
           <div
             className="card"
@@ -338,6 +454,11 @@ export default function PatchBatch() {
                   {result.testsPassed === false ? '✗ Tests Failed - No PR created' : 'Update failed'}
                 </div>
                 <div style={{ fontSize: '13px' }}>{result.error}</div>
+                {result.branchName && (
+                  <div style={{ fontSize: '12px', marginTop: '6px', color: 'var(--text-secondary)' }}>
+                    Branch available: {result.branchName}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -425,7 +546,7 @@ export default function PatchBatch() {
             />
             {runTests && testCommandDetected && (
               <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                Detected from package.json - will run: {testCommand}
+                Detected command - will run: {testCommand}
               </div>
             )}
             {runTests && isJavascriptRepo && !testCommandDetected && (
@@ -441,18 +562,37 @@ export default function PatchBatch() {
         <div className="card-header">
           <div>
             <h3 className="card-title">Outdated Packages</h3>
-            {patchUpdatesCount > 0 && (
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                {patchUpdatesCount} patch update{patchUpdatesCount !== 1 ? 's' : ''} available
-              </span>
-            )}
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              {patchUpdatesCount > 0
+                ? `${patchUpdatesCount} patch update${patchUpdatesCount !== 1 ? 's' : ''} available`
+                : 'No patch updates detected'}
+            </div>
           </div>
           <div className="table-actions">
+            <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
+              {selectedPackages.size} selected
+            </span>
             <button className="btn btn-ghost btn-sm" onClick={selectAll}>
               Select All
             </button>
             <button className="btn btn-ghost btn-sm" onClick={clearSelection}>
               Deselect All
+            </button>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={runPatchBatch}
+              disabled={selectedPackages.size === 0 || running || !selectedRepo.hasGit}
+            >
+              {running ? (
+                <>
+                  <div className="spinner" style={{ width: '14px', height: '14px', borderTopColor: '#000' }} />
+                  {runButtonLabel()}
+                </>
+              ) : (
+                <>
+                  {runButtonLabel()}
+                </>
+              )}
             </button>
           </div>
         </div>
@@ -520,33 +660,6 @@ export default function PatchBatch() {
           </div>
         )}
 
-        {packages.length > 0 && (
-          <div className="table-footer">
-            <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
-              {selectedPackages.size} package{selectedPackages.size !== 1 ? 's' : ''} selected for update
-            </span>
-            <button
-              className="btn btn-primary"
-              onClick={runPatchBatch}
-              disabled={selectedPackages.size === 0 || running || !selectedRepo.hasGit}
-            >
-              {running ? (
-                <>
-                  <div className="spinner" style={{ width: '14px', height: '14px', borderTopColor: '#000' }} />
-                  {runButtonLabel()}
-                </>
-              ) : (
-                <>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M21 12a9 9 0 11-9-9" />
-                    <path d="M21 3v6h-6" />
-                  </svg>
-                  {runButtonLabel()}
-                </>
-              )}
-            </button>
-          </div>
-        )}
       </div>
 
       <div className="card">
@@ -562,6 +675,25 @@ export default function PatchBatch() {
             ))
           )}
         </div>
+      </div>
+
+      <div className="card" style={{ marginTop: '24px' }}>
+        <div className="card-header">
+          <div>
+            <h3 className="card-title">Scheduler</h3>
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              Set it and forget it. Schedule updates for any repo.
+            </div>
+          </div>
+          <button className="btn btn-secondary btn-sm" onClick={() => setShowScheduler(!showScheduler)}>
+            {showScheduler ? 'Hide Scheduler' : 'Show Scheduler'}
+          </button>
+        </div>
+        {showScheduler && (
+          <div style={{ paddingTop: '12px' }}>
+            <Scheduler />
+          </div>
+        )}
       </div>
     </div>
   )

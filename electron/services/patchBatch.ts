@@ -23,7 +23,8 @@ import {
   runTests,
   runLint,
   abortChanges,
-  deleteBranch
+  deleteBranch,
+  ensureSafeBranch
 } from './git'
 
 const execAsync = promisify(exec)
@@ -56,6 +57,28 @@ export interface PatchBatchHandlers {
   onProgress?: (message: string, step: number, total: number) => void
   onLog?: (message: string) => void
   onWarning?: (warning: { message: string; output: string }) => void
+}
+
+export interface SecurityPatchConfig {
+  repoPath: string
+  branchName: string
+  createPR: boolean
+  runTests: boolean
+  testCommand?: string
+}
+
+export interface SecurityPatchResult {
+  success: boolean
+  updatedPackages: string[]
+  failedPackages: string[]
+  prUrl?: string | null
+  error?: string
+  testsPassed?: boolean
+}
+
+export interface SecurityPatchHandlers {
+  onProgress?: (message: string, step: number, total: number) => void
+  onLog?: (message: string) => void
 }
 
 function formatError(error: unknown, fallback: string): string {
@@ -204,10 +227,11 @@ export async function runPatchBatchPipeline(
 
   let originalBranch = ''
   let branchCreated = false
+  let changesCommitted = false
 
   const fail = async (message: string, extra?: Partial<PatchBatchResult>) => {
     onLog(`✗ ${message}`)
-    if (branchCreated && originalBranch) {
+    if (branchCreated && originalBranch && !changesCommitted) {
       onLog('Reverting changes and cleaning up...')
       await abortChanges(repoPath, originalBranch)
       await deleteBranch(repoPath, branchName)
@@ -359,6 +383,7 @@ export async function runPatchBatchPipeline(
       `chore(deps): update ${allUpdated.length} packages to latest patch versions\n\nUpdated packages:\n${allUpdated.map(p => `- ${p}`).join('\n')}`,
       files
     )
+    changesCommitted = true
 
     if (!createPR) {
       onLog('[3/3] Committing updates...')
@@ -374,16 +399,45 @@ export async function runPatchBatchPipeline(
     }
 
     onProgress('Pushing branch...', ++currentStep, totalSteps)
-    await pushBranch(repoPath, branchName)
+    try {
+      await pushBranch(repoPath, branchName)
+    } catch (error) {
+      const message = formatError(error, 'Push failed. Please check your git remote configuration.')
+      onLog(`✗ ${message}`)
+      return {
+        success: false,
+        updatedPackages: allUpdated,
+        failedPackages: allFailed,
+        branchName,
+        error: message,
+        testsPassed: shouldRunTests ? testsPassed : undefined,
+        testOutput
+      }
+    }
 
     onProgress('Creating pull request...', ++currentStep, totalSteps)
     onLog('[3/3] Creating PR...')
 
-    const prUrl = await createPullRequest(
-      repoPath,
-      prTitle || `chore(deps): update ${allUpdated.length} packages`,
-      prBody || `## Summary\nAutomated patch version updates via Bridge.\n\n### Updated packages\n${allUpdated.map(p => `- ${p}`).join('\n')}\n\n${shouldRunTests ? '### Checks\n- [x] Tests passed\n- [x] Lint checked' : ''}`
-    )
+    let prUrl: string | null = null
+    try {
+      prUrl = await createPullRequest(
+        repoPath,
+        prTitle || `chore(deps): update ${allUpdated.length} packages`,
+        prBody || `## Summary\nAutomated patch version updates via Bridge.\n\n### Updated packages\n${allUpdated.map(p => `- ${p}`).join('\n')}\n\n${shouldRunTests ? '### Checks\n- [x] Tests passed\n- [x] Lint checked' : ''}`
+      )
+    } catch (error) {
+      const message = formatError(error, 'PR creation failed. Please open a PR manually.')
+      onLog(`✗ ${message}`)
+      return {
+        success: false,
+        updatedPackages: allUpdated,
+        failedPackages: allFailed,
+        branchName,
+        error: message,
+        testsPassed: shouldRunTests ? testsPassed : undefined,
+        testOutput
+      }
+    }
 
     onLog(`✓ PR created: ${prUrl}`)
 
@@ -398,5 +452,191 @@ export async function runPatchBatchPipeline(
     }
   } catch (error) {
     return fail(formatError(error, 'Update failed. Please try again.'))
+  }
+}
+
+interface AuditTarget {
+  name: string
+  severity: 'high' | 'critical'
+  fixVersion?: string
+}
+
+async function getAuditTargets(repoPath: string): Promise<AuditTarget[]> {
+  const targets: AuditTarget[] = []
+  try {
+    const { stdout } = await execAsync('npm audit --json', {
+      cwd: repoPath,
+      timeout: 120000,
+      maxBuffer: 20 * 1024 * 1024
+    })
+    const payload = JSON.parse(stdout || '{}')
+
+    if (payload.vulnerabilities) {
+      for (const [name, data] of Object.entries(payload.vulnerabilities) as [string, any][]) {
+        const severity = String(data.severity || '').toLowerCase()
+        if (severity !== 'critical' && severity !== 'high') continue
+        const fixAvailable = data.fixAvailable
+        let fixVersion: string | undefined
+        if (fixAvailable && typeof fixAvailable === 'object') {
+          if (fixAvailable.isSemVerMajor) {
+            continue
+          }
+          fixVersion = fixAvailable.version
+        }
+        targets.push({ name, severity: severity as 'high' | 'critical', fixVersion })
+      }
+    }
+
+    if (payload.advisories) {
+      for (const advisory of Object.values(payload.advisories) as any[]) {
+        const severity = String(advisory.severity || '').toLowerCase()
+        if (severity !== 'critical' && severity !== 'high') continue
+        const name = advisory.module_name
+        const fixVersion = advisory.fix_available && advisory.fix_available.name
+          ? advisory.fix_available.version
+          : advisory.fix_available && typeof advisory.fix_available === 'string'
+            ? advisory.fix_available
+            : undefined
+        targets.push({ name, severity: severity as 'high' | 'critical', fixVersion })
+      }
+    }
+  } catch (error) {
+    console.error('npm audit failed:', error)
+  }
+
+  return targets
+}
+
+async function discardWorkingTree(repoPath: string): Promise<void> {
+  try {
+    await execAsync('git checkout -- .', { cwd: repoPath })
+    await execAsync('git clean -fd', { cwd: repoPath })
+  } catch {}
+}
+
+async function createIssue(repoPath: string, title: string, body: string): Promise<void> {
+  const safeTitle = title.replace(/\"/g, '\\\"')
+  const safeBody = body.replace(/\"/g, '\\\"')
+  try {
+    await execAsync(`gh issue create --title \"${safeTitle}\" --body \"${safeBody}\"`, { cwd: repoPath })
+  } catch {}
+}
+
+export async function runSecurityPatchPipeline(
+  config: SecurityPatchConfig,
+  handlers: SecurityPatchHandlers = {}
+): Promise<SecurityPatchResult> {
+  const { repoPath, branchName, createPR, runTests: shouldRunTests, testCommand } = config
+  const onProgress = handlers.onProgress || (() => {})
+  const onLog = handlers.onLog || (() => {})
+  const updatedPackages: string[] = []
+  const failedPackages: string[] = []
+  let branchCreated = false
+  let originalBranch = ''
+
+  try {
+    await fs.access(path.join(repoPath, '.git'))
+  } catch {
+    return { success: false, updatedPackages: [], failedPackages: [], error: 'Git not initialized.' }
+  }
+
+  try {
+    await ensureSafeBranch(repoPath, branchName)
+    const repoInfo = await getRepoInfo(repoPath)
+    originalBranch = repoInfo.branch
+
+    const targets = await getAuditTargets(repoPath)
+    const uniqueTargets = Array.from(
+      new Map(targets.filter(target => target.fixVersion).map(target => [target.name, target])).values()
+    )
+
+    if (uniqueTargets.length === 0) {
+      return { success: false, updatedPackages: [], failedPackages: [], error: 'No critical/high vulnerabilities with safe fixes found.' }
+    }
+
+    await createBranch(repoPath, branchName)
+    branchCreated = true
+
+    const totalSteps = uniqueTargets.length
+    let step = 0
+    let testsPassed = true
+
+    for (const target of uniqueTargets) {
+      step += 1
+      onProgress(`Patching ${target.name} (${target.severity})`, step, totalSteps)
+      onLog(`Updating ${target.name} to ${target.fixVersion}`)
+
+      try {
+        await execAsync(`npm install ${target.name}@${target.fixVersion}`, {
+          cwd: repoPath,
+          timeout: DEFAULT_TEST_TIMEOUT_MS,
+          maxBuffer: 20 * 1024 * 1024
+        })
+
+        if (shouldRunTests) {
+          const cmd = testCommand?.trim() || getTestCommand('javascript')
+          if (!cmd) {
+            throw new Error('No test command found')
+          }
+          const result = await runTests(repoPath, cmd, { timeoutMs: DEFAULT_TEST_TIMEOUT_MS })
+          if (!result.success) {
+            testsPassed = false
+            failedPackages.push(target.name)
+            await createIssue(
+              repoPath,
+              `Manual fix needed: ${target.name} vulnerability`,
+              `Bridge attempted to patch ${target.name} but tests failed.\\n\\nTest output:\\n${result.output}`
+            )
+            await discardWorkingTree(repoPath)
+            continue
+          }
+        }
+
+        await commitChanges(repoPath, `chore(security): patch ${target.name}`)
+        updatedPackages.push(target.name)
+      } catch {
+        failedPackages.push(target.name)
+        await discardWorkingTree(repoPath)
+      }
+    }
+
+    let prUrl: string | null | undefined = null
+    if (createPR && updatedPackages.length > 0) {
+      await pushBranch(repoPath, branchName)
+      prUrl = await createPullRequest(
+        repoPath,
+        `chore(security): patch ${updatedPackages.length} vulnerable packages`,
+        `## Summary\\nBridge patched ${updatedPackages.length} vulnerable packages.\\n\\n### Updated packages\\n${updatedPackages.map(pkg => `- ${pkg}`).join('\\n')}`
+      )
+    }
+
+    if (updatedPackages.length === 0) {
+      if (branchCreated && originalBranch) {
+        await abortChanges(repoPath, originalBranch)
+        await deleteBranch(repoPath, branchName)
+      }
+      return {
+        success: false,
+        updatedPackages,
+        failedPackages,
+        error: 'No packages were successfully patched.',
+        testsPassed
+      }
+    }
+
+    return {
+      success: failedPackages.length === 0,
+      updatedPackages,
+      failedPackages,
+      prUrl,
+      testsPassed
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Security patch failed'
+    if (branchCreated && originalBranch) {
+      await abortChanges(repoPath, originalBranch)
+      await deleteBranch(repoPath, branchName)
+    }
+    return { success: false, updatedPackages, failedPackages, error: message }
   }
 }

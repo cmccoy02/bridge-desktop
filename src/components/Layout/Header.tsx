@@ -7,7 +7,14 @@ interface HeaderProps {
 }
 
 const viewTitles: Partial<Record<View, string>> = {
-  'patch-batch': 'Update Dependencies'
+  dashboard: 'Dashboard',
+  'patch-batch': 'Update Dependencies',
+  'full-scan': 'Full TD Scan',
+  cleanup: 'Cleanup',
+  scheduler: 'Scheduler',
+  security: 'Security Scanner',
+  files: 'File Browser',
+  settings: 'Settings'
 }
 
 export default function Header({ currentView }: HeaderProps) {
@@ -18,7 +25,7 @@ export default function Header({ currentView }: HeaderProps) {
     <header className="app-header">
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         <h1 style={{ fontSize: '18px', fontWeight: 600 }}>
-          {viewTitles[currentView] || 'Update Dependencies'}
+          {viewTitles[currentView] || 'Bridge'}
         </h1>
         <span className="badge" style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', fontSize: '11px' }}>
           v0.1.0-demo

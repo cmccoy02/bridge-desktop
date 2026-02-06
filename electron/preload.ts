@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 export type Language = 'javascript' | 'python' | 'ruby' | 'elixir' | 'unknown'
-export type ScheduleFrequency = 'daily' | 'weekly' | 'monthly'
+export type ScheduleFrequency = 'hourly' | 'daily' | 'weekly' | 'monthly'
 
 export interface Repository {
   path: string
@@ -60,6 +60,23 @@ export interface PatchBatchResult {
   testOutput?: string
 }
 
+export interface SecurityPatchConfig {
+  repoPath: string
+  branchName: string
+  createPR: boolean
+  runTests: boolean
+  testCommand?: string
+}
+
+export interface SecurityPatchResult {
+  success: boolean
+  updatedPackages: string[]
+  failedPackages: string[]
+  prUrl?: string | null
+  error?: string
+  testsPassed?: boolean
+}
+
 export interface LargeFile {
   path: string
   size: number
@@ -99,6 +116,17 @@ export interface ScheduledJob {
   language: string
   createPR: boolean
   runTests: boolean
+  createdAt: string
+}
+
+export interface SmartScanSchedule {
+  id: string
+  repoPath: string
+  repoName: string
+  enabled: boolean
+  quietHour: number
+  lastRun: string | null
+  nextRun: string
   createdAt: string
 }
 
@@ -145,6 +173,109 @@ export interface ScanProgress {
   currentFile?: string
 }
 
+export interface VulnerabilitySummary {
+  critical: number
+  high: number
+  medium: number
+  low: number
+  total: number
+}
+
+export interface DependencyReport {
+  outdated: OutdatedPackage[]
+  vulnerabilities: VulnerabilitySummary
+  error?: string
+}
+
+export interface CircularDependency {
+  from: string
+  to: string
+  cycle: string[]
+}
+
+export interface CircularDependencyReport {
+  count: number
+  dependencies: CircularDependency[]
+  error?: string
+}
+
+export interface DeadCodeExport {
+  file: string
+  exportName: string
+}
+
+export interface DeadCodeReport {
+  deadFiles: string[]
+  unusedExports: DeadCodeExport[]
+  totalDeadCodeCount: number
+  raw?: {
+    knip?: string
+    unimported?: string
+  }
+  error?: string
+}
+
+export interface BundleModule {
+  name: string
+  size: number
+  sizeFormatted: string
+}
+
+export interface BundleAnalysisReport {
+  totalSize: number
+  totalSizeFormatted: string
+  largestModules: BundleModule[]
+  previousSize?: number
+  delta?: number
+  deltaPercent?: number
+  warning?: boolean
+  statsPath?: string
+  error?: string
+}
+
+export interface TestCoverageReport {
+  coveragePercentage: number | null
+  uncoveredCriticalFiles: { file: string; coverage: number }[]
+  summaryPath?: string
+  error?: string
+}
+
+export interface DocumentationDebtReport {
+  missingReadmeSections: string[]
+  readmeOutdated: boolean
+  daysSinceUpdate: number
+  undocumentedFunctions: number
+  error?: string
+}
+
+export interface ConsoleUploadResult {
+  success: boolean
+  tdScore?: number
+  tdDelta?: number
+  error?: string
+}
+
+export interface FullScanResult {
+  scanDate: string
+  repository: string
+  repositoryUrl?: string | null
+  dependencies: DependencyReport
+  circularDependencies: CircularDependencyReport
+  deadCode: DeadCodeReport
+  bundleSize: BundleAnalysisReport
+  testCoverage: TestCoverageReport
+  documentation: DocumentationDebtReport
+  consoleUpload?: ConsoleUploadResult
+  durationMs: number
+}
+
+export interface BridgeConsoleSettings {
+  consoleUrl: string
+  apiToken: string
+  githubUsername: string
+  autoUpload: boolean
+}
+
 contextBridge.exposeInMainWorld('bridge', {
   // Repository management
   selectDirectory: (): Promise<string | null> =>
@@ -182,12 +313,32 @@ contextBridge.exposeInMainWorld('bridge', {
   getCleanupReport: (repoPath: string): Promise<CleanupReport> =>
     ipcRenderer.invoke('get-cleanup-report', repoPath),
 
+  detectDeadCode: (repoPath: string): Promise<DeadCodeReport> =>
+    ipcRenderer.invoke('detect-dead-code', repoPath),
+
+  runFullScan: (repoPath: string): Promise<FullScanResult> =>
+    ipcRenderer.invoke('run-full-scan', repoPath),
+
+  onFullScanProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => {
+    ipcRenderer.on('full-scan-progress', (_, progress) => callback(progress))
+    return () => ipcRenderer.removeAllListeners('full-scan-progress')
+  },
+
+  deleteDeadFile: (repoPath: string, relativePath: string): Promise<boolean> =>
+    ipcRenderer.invoke('delete-dead-file', repoPath, relativePath),
+
+  cleanupDeadCode: (payload: { repoPath: string; deadFiles: string[]; unusedExports: DeadCodeExport[]; createPr?: boolean }): Promise<any> =>
+    ipcRenderer.invoke('cleanup-dead-code', payload),
+
   // Patch Batch
   getOutdatedPackages: (repoPath: string, language?: Language): Promise<OutdatedPackage[]> =>
     ipcRenderer.invoke('get-outdated-packages', repoPath, language),
 
   runPatchBatch: (config: PatchBatchConfig): Promise<PatchBatchResult> =>
     ipcRenderer.invoke('run-patch-batch', config),
+
+  runSecurityPatch: (config: SecurityPatchConfig): Promise<SecurityPatchResult> =>
+    ipcRenderer.invoke('run-security-patch', config),
 
   onPatchBatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => {
     ipcRenderer.on('patch-batch-progress', (_, progress) => callback(progress))
@@ -202,6 +353,16 @@ contextBridge.exposeInMainWorld('bridge', {
   onPatchBatchLog: (callback: (entry: { message: string }) => void) => {
     ipcRenderer.on('patch-batch-log', (_, entry) => callback(entry))
     return () => ipcRenderer.removeAllListeners('patch-batch-log')
+  },
+
+  onSecurityPatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => {
+    ipcRenderer.on('security-patch-progress', (_, progress) => callback(progress))
+    return () => ipcRenderer.removeAllListeners('security-patch-progress')
+  },
+
+  onSecurityPatchLog: (callback: (entry: { message: string }) => void) => {
+    ipcRenderer.on('security-patch-log', (_, entry) => callback(entry))
+    return () => ipcRenderer.removeAllListeners('security-patch-log')
   },
 
   // Git
@@ -232,6 +393,23 @@ contextBridge.exposeInMainWorld('bridge', {
     return () => ipcRenderer.removeAllListeners('scheduler-job-started')
   },
 
+  getSmartScanSchedules: (): Promise<SmartScanSchedule[]> =>
+    ipcRenderer.invoke('get-smart-scan-schedules'),
+
+  addSmartScanSchedule: (payload: { repoPath: string; repoName: string }): Promise<SmartScanSchedule> =>
+    ipcRenderer.invoke('add-smart-scan-schedule', payload),
+
+  updateSmartScanSchedule: (id: string, updates: Partial<SmartScanSchedule>): Promise<SmartScanSchedule | null> =>
+    ipcRenderer.invoke('update-smart-scan-schedule', id, updates),
+
+  deleteSmartScanSchedule: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke('delete-smart-scan-schedule', id),
+
+  onSmartScanStarted: (callback: (data: { id: string; repoName: string }) => void) => {
+    ipcRenderer.on('smart-scan-started', (_, data) => callback(data))
+    return () => ipcRenderer.removeAllListeners('smart-scan-started')
+  },
+
   // Security Scanner
   checkSecurityScannerAvailable: (): Promise<boolean> =>
     ipcRenderer.invoke('check-security-scanner-available'),
@@ -245,7 +423,17 @@ contextBridge.exposeInMainWorld('bridge', {
   onSecurityScanProgress: (callback: (progress: ScanProgress) => void) => {
     ipcRenderer.on('security-scan-progress', (_, progress) => callback(progress))
     return () => ipcRenderer.removeAllListeners('security-scan-progress')
-  }
+  },
+
+  // Bridge Console settings
+  getBridgeConsoleSettings: (): Promise<BridgeConsoleSettings> =>
+    ipcRenderer.invoke('get-bridge-console-settings'),
+
+  saveBridgeConsoleSettings: (settings: BridgeConsoleSettings): Promise<BridgeConsoleSettings> =>
+    ipcRenderer.invoke('save-bridge-console-settings', settings),
+
+  testBridgeConsoleConnection: (settings: BridgeConsoleSettings): Promise<{ ok: boolean; message?: string }> =>
+    ipcRenderer.invoke('test-bridge-console-connection', settings)
 })
 
 declare global {
@@ -262,10 +450,18 @@ declare global {
       cleanupMissingRepos: () => Promise<Repository[]>
       getFileStats: (repoPath: string) => Promise<FileSizeStats>
       getCleanupReport: (repoPath: string) => Promise<CleanupReport>
+      detectDeadCode: (repoPath: string) => Promise<DeadCodeReport>
+      runFullScan: (repoPath: string) => Promise<FullScanResult>
+      onFullScanProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
+      deleteDeadFile: (repoPath: string, relativePath: string) => Promise<boolean>
+      cleanupDeadCode: (payload: { repoPath: string; deadFiles: string[]; unusedExports: DeadCodeExport[]; createPr?: boolean }) => Promise<any>
       getOutdatedPackages: (repoPath: string, language?: Language) => Promise<OutdatedPackage[]>
       runPatchBatch: (config: PatchBatchConfig) => Promise<PatchBatchResult>
+      runSecurityPatch: (config: SecurityPatchConfig) => Promise<SecurityPatchResult>
       onPatchBatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
       onPatchBatchWarning: (callback: (warning: { message: string; output: string }) => void) => () => void
+      onSecurityPatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
+      onSecurityPatchLog: (callback: (entry: { message: string }) => void) => () => void
       getRepoInfo: (repoPath: string) => Promise<RepoInfo>
       checkProtectedBranch: (repoPath: string) => Promise<boolean>
       getScheduledJobs: () => Promise<ScheduledJob[]>
@@ -274,10 +470,18 @@ declare global {
       deleteScheduledJob: (jobId: string) => Promise<boolean>
       getJobResults: (jobId?: string) => Promise<JobResult[]>
       onSchedulerJobStarted: (callback: (data: { jobId: string; repoName: string }) => void) => () => void
+      getSmartScanSchedules: () => Promise<SmartScanSchedule[]>
+      addSmartScanSchedule: (payload: { repoPath: string; repoName: string }) => Promise<SmartScanSchedule>
+      updateSmartScanSchedule: (id: string, updates: Partial<SmartScanSchedule>) => Promise<SmartScanSchedule | null>
+      deleteSmartScanSchedule: (id: string) => Promise<boolean>
+      onSmartScanStarted: (callback: (data: { id: string; repoName: string }) => void) => () => void
       checkSecurityScannerAvailable: () => Promise<boolean>
       runSecurityScan: (repoPath: string) => Promise<ScanResult>
       generateSecurityFix: (finding: SecurityFinding) => Promise<string | null>
       onSecurityScanProgress: (callback: (progress: ScanProgress) => void) => () => void
+      getBridgeConsoleSettings: () => Promise<BridgeConsoleSettings>
+      saveBridgeConsoleSettings: (settings: BridgeConsoleSettings) => Promise<BridgeConsoleSettings>
+      testBridgeConsoleConnection: (settings: BridgeConsoleSettings) => Promise<{ ok: boolean; message?: string }>
     }
   }
 }

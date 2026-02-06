@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { ScheduledJob, ScheduleFrequency, JobResult } from '../../types'
+import type { ScheduledJob, ScheduleFrequency, JobResult, SmartScanSchedule } from '../../types'
 
 const FREQUENCY_LABELS: Record<ScheduleFrequency, string> = {
+  hourly: 'Hourly',
   daily: 'Daily',
   weekly: 'Weekly',
   monthly: 'Monthly'
@@ -12,17 +13,29 @@ export default function Scheduler() {
   const { repositories } = useRepositories()
   const [jobs, setJobs] = useState<ScheduledJob[]>([])
   const [results, setResults] = useState<JobResult[]>([])
+  const [smartSchedules, setSmartSchedules] = useState<SmartScanSchedule[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddModal, setShowAddModal] = useState(false)
+  const [smartMessage, setSmartMessage] = useState<string | null>(null)
 
   // New job form state
   const [selectedRepo, setSelectedRepo] = useState('')
   const [frequency, setFrequency] = useState<ScheduleFrequency>('weekly')
   const [createPR, setCreatePR] = useState(true)
   const [runTests, setRunTests] = useState(true)
+  const [smartRepo, setSmartRepo] = useState('')
 
   useEffect(() => {
     loadJobs()
+    loadSmartSchedules()
+  }, [])
+
+  useEffect(() => {
+    const cleanup = window.bridge.onSmartScanStarted(({ repoName }) => {
+      setSmartMessage(`Smart scan started for ${repoName}`)
+      setTimeout(() => setSmartMessage(null), 4000)
+    })
+    return cleanup
   }, [])
 
   const loadJobs = async () => {
@@ -38,6 +51,15 @@ export default function Scheduler() {
       console.error('Failed to load jobs:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadSmartSchedules = async () => {
+    try {
+      const schedules = await window.bridge.getSmartScanSchedules()
+      setSmartSchedules(schedules)
+    } catch (error) {
+      console.error('Failed to load smart schedules:', error)
     }
   }
 
@@ -83,6 +105,37 @@ export default function Scheduler() {
     }
   }
 
+  const addSmartSchedule = async () => {
+    if (!smartRepo) return
+    const repo = repositories.find(r => r.path === smartRepo)
+    if (!repo) return
+    try {
+      await window.bridge.addSmartScanSchedule({ repoPath: repo.path, repoName: repo.name })
+      setSmartRepo('')
+      await loadSmartSchedules()
+    } catch (error) {
+      console.error('Failed to add smart schedule:', error)
+    }
+  }
+
+  const toggleSmartSchedule = async (id: string, enabled: boolean) => {
+    try {
+      await window.bridge.updateSmartScanSchedule(id, { enabled })
+      await loadSmartSchedules()
+    } catch (error) {
+      console.error('Failed to update smart schedule:', error)
+    }
+  }
+
+  const deleteSmartSchedule = async (id: string) => {
+    try {
+      await window.bridge.deleteSmartScanSchedule(id)
+      await loadSmartSchedules()
+    } catch (error) {
+      console.error('Failed to delete smart schedule:', error)
+    }
+  }
+
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return 'Never'
     const date = new Date(dateStr)
@@ -110,6 +163,63 @@ export default function Scheduler() {
             </svg>
             Add Schedule
           </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: '24px' }}>
+        <div className="card-header">
+          <h3 className="card-title">Smart TD Scans</h3>
+        </div>
+        <div style={{ padding: '0 16px 16px' }}>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '12px' }}>
+            Bridge will analyze commit patterns and schedule scans during low-activity hours.
+          </p>
+
+          {smartMessage && <div className="alert success" style={{ marginBottom: '12px' }}>{smartMessage}</div>}
+
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+            <select
+              className="input"
+              value={smartRepo}
+              onChange={e => setSmartRepo(e.target.value)}
+              style={{ minWidth: '220px' }}
+            >
+              <option value="">Select repository...</option>
+              {repositories.filter(r => r.exists && r.hasGit).map(repo => (
+                <option key={repo.path} value={repo.path}>
+                  {repo.name}
+                </option>
+              ))}
+            </select>
+            <button className="btn btn-primary btn-sm" onClick={addSmartSchedule} disabled={!smartRepo}>
+              Enable Smart Scan
+            </button>
+          </div>
+
+          {smartSchedules.length === 0 ? (
+            <div style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>No smart scans configured.</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {smartSchedules.map(schedule => (
+                <div key={schedule.id} className="list-item">
+                  <div>
+                    <div className="list-title">{schedule.repoName}</div>
+                    <div className="list-sub">Quiet hour: {schedule.quietHour}:00 · Next run: {formatDate(schedule.nextRun)}</div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button className="btn btn-secondary btn-sm" onClick={() => toggleSmartSchedule(schedule.id, !schedule.enabled)}>
+                      {schedule.enabled ? 'Pause' : 'Resume'}
+                    </button>
+                    <button className="btn btn-ghost btn-icon" onClick={() => deleteSmartSchedule(schedule.id)}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -287,7 +397,7 @@ export default function Scheduler() {
                   Frequency
                 </label>
                 <div style={{ display: 'flex', gap: '8px' }}>
-                  {(['daily', 'weekly', 'monthly'] as ScheduleFrequency[]).map(freq => (
+                  {(['hourly', 'daily', 'weekly', 'monthly'] as ScheduleFrequency[]).map(freq => (
                     <button
                       key={freq}
                       className={`btn ${frequency === freq ? 'btn-primary' : 'btn-secondary'} btn-sm`}

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { CleanupReport, FileSizeStats } from '../../types'
+import type { CleanupReport, FileSizeStats, DeadCodeReport } from '../../types'
 
 export default function Cleanup() {
   const { selectedRepo } = useRepositories()
@@ -8,6 +8,9 @@ export default function Cleanup() {
   const [stats, setStats] = useState<FileSizeStats | null>(null)
   const [report, setReport] = useState<CleanupReport | null>(null)
   const [activeTab, setActiveTab] = useState<'files' | 'git-history' | 'components'>('files')
+  const [deadCode, setDeadCode] = useState<DeadCodeReport | null>(null)
+  const [deadCodeLoading, setDeadCodeLoading] = useState(false)
+  const [deadCodeMessage, setDeadCodeMessage] = useState<string | null>(null)
 
   useEffect(() => {
     if (selectedRepo) {
@@ -32,6 +35,44 @@ export default function Cleanup() {
     }
   }
 
+  const loadDeadCode = async () => {
+    if (!selectedRepo) return
+    setDeadCodeLoading(true)
+    setDeadCodeMessage(null)
+    try {
+      const result = await window.bridge.detectDeadCode(selectedRepo.path)
+      setDeadCode(result)
+    } catch (error) {
+      setDeadCodeMessage(error instanceof Error ? error.message : 'Failed to detect dead code')
+    } finally {
+      setDeadCodeLoading(false)
+    }
+  }
+
+  const cleanupAllDeadCode = async () => {
+    if (!selectedRepo || !deadCode) return
+    setDeadCodeLoading(true)
+    setDeadCodeMessage(null)
+    try {
+      const result = await window.bridge.cleanupDeadCode({
+        repoPath: selectedRepo.path,
+        deadFiles: deadCode.deadFiles,
+        unusedExports: deadCode.unusedExports,
+        createPr: true
+      })
+      if (result.success) {
+        setDeadCodeMessage('Cleanup PR created successfully.')
+        setDeadCode({ ...deadCode, deadFiles: [] })
+      } else {
+        setDeadCodeMessage(result.error || 'Cleanup failed')
+      }
+    } catch (error) {
+      setDeadCodeMessage(error instanceof Error ? error.message : 'Cleanup failed')
+    } finally {
+      setDeadCodeLoading(false)
+    }
+  }
+
   if (!selectedRepo) {
     return (
       <div className="empty-state fade-in">
@@ -46,6 +87,52 @@ export default function Cleanup() {
 
   return (
     <div className="fade-in">
+      <div className="card" style={{ marginBottom: '24px' }}>
+        <div className="card-header">
+          <h3 className="card-title">Dead Code Cleanup</h3>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="btn btn-secondary btn-sm" onClick={loadDeadCode} disabled={deadCodeLoading}>
+              {deadCodeLoading ? 'Scanning...' : 'Detect Dead Code'}
+            </button>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={cleanupAllDeadCode}
+              disabled={deadCodeLoading || !deadCode || deadCode.deadFiles.length === 0}
+            >
+              Cleanup All
+            </button>
+          </div>
+        </div>
+
+        {deadCodeMessage && (
+          <div style={{ padding: '0 16px 12px', color: 'var(--text-secondary)' }}>
+            {deadCodeMessage}
+          </div>
+        )}
+
+        {deadCode && (
+          <div style={{ padding: '0 16px 16px' }}>
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+              {deadCode.deadFiles.length} unused files, {deadCode.unusedExports.length} unused exports
+            </div>
+            {deadCode.deadFiles.length === 0 ? (
+              <div style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>No unused files detected.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {deadCode.deadFiles.slice(0, 5).map(file => (
+                  <div key={file} style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{file}</div>
+                ))}
+                {deadCode.deadFiles.length > 5 && (
+                  <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                    +{deadCode.deadFiles.length - 5} more
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <div style={{ marginBottom: '24px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
           <div>

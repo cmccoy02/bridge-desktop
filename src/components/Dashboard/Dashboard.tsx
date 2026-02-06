@@ -1,20 +1,40 @@
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { View, Language } from '../../types'
+import { useScanContext, type ScanTab } from '../../contexts/ScanContext'
+import type { View } from '../../types'
 
 interface DashboardProps {
   onNavigate: (view: View) => void
 }
 
-const LANGUAGE_LABELS: Record<Language, string> = {
-  javascript: 'JavaScript/Node',
-  python: 'Python',
-  ruby: 'Ruby',
-  elixir: 'Elixir',
-  unknown: 'Unknown'
+const formatRelativeTime = (iso?: string | null) => {
+  if (!iso) return 'Never'
+  const date = new Date(iso)
+  const diff = Date.now() - date.getTime()
+  const minutes = Math.floor(diff / 60000)
+  if (minutes < 1) return 'Just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
 }
 
 export default function Dashboard({ onNavigate }: DashboardProps) {
-  const { repositories, selectedRepo, addRepository, removeRepository } = useRepositories()
+  const { repositories, selectedRepo, addRepository, removeRepository, selectRepository } = useRepositories()
+  const { scanResults, requestScan, setPreferredTab } = useScanContext()
+
+  const scanResult = selectedRepo ? scanResults[selectedRepo.path] : null
+  const lastScan = scanResult ? formatRelativeTime(scanResult.scanDate) : 'Never'
+  const tdScore = scanResult?.consoleUpload?.tdScore
+  const tdDelta = scanResult?.consoleUpload?.tdDelta
+
+  const navigateToScan = (tab: ScanTab, autoRun = false) => {
+    setPreferredTab(tab)
+    if (autoRun && selectedRepo) {
+      requestScan(selectedRepo.path)
+    }
+    onNavigate('full-scan')
+  }
 
   const handleImport = async () => {
     const path = await window.bridge.selectDirectory()
@@ -23,100 +43,89 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
     }
   }
 
-  const features = [
-    {
-      id: 'patch-batch',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
-          <path d="M21 12a9 9 0 11-9-9" />
-          <path d="M21 3v6h-6" />
-        </svg>
-      ),
-      title: 'Patch Batch',
-      subtitle: 'Update packages safely',
-      description: 'Update all packages to their latest patch versions with tests.',
-      view: 'patch-batch' as View
-    },
-    {
-      id: 'cleanup',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
-          <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-        </svg>
-      ),
-      title: 'Cleanup',
-      subtitle: 'Find hidden bloat',
-      description: 'Find large files in git history and oversized components.',
-      view: 'cleanup' as View
-    },
-    {
-      id: 'scheduler',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
-          <circle cx="12" cy="12" r="10" />
-          <polyline points="12 6 12 12 16 14" />
-        </svg>
-      ),
-      title: 'Scheduler',
-      subtitle: 'Set it and forget it',
-      description: 'Automate updates daily, weekly, or monthly across repos.',
-      view: 'scheduler' as View
-    },
-    {
-      id: 'security',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-        </svg>
-      ),
-      title: 'Security Scanner',
-      subtitle: 'Find vulnerabilities',
-      description: 'Scan for SQL injection, XSS, secrets, and more with AI-powered fixes.',
-      view: 'security' as View
-    },
-    {
-      id: 'files',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2">
-          <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-        </svg>
-      ),
-      title: 'File Browser',
-      subtitle: 'Explore your repos',
-      description: 'Browse files with size info, find the biggest files.',
-      view: 'files' as View
-    }
-  ]
-
   return (
     <div className="fade-in">
-      <div style={{ marginBottom: '32px' }}>
-        <h2 style={{ marginBottom: '8px' }}>Welcome to Bridge</h2>
-        <p style={{ color: 'var(--text-secondary)' }}>
-          Manage tech debt and keep your dependencies up to date. Works with JavaScript, Python, Ruby, and Elixir.
-        </p>
+      <div className="dashboard-hero">
+        <div>
+          <h2>Bridge-Desktop</h2>
+          <p>Automated technical debt reduction and metrics pipeline.</p>
+        </div>
+        <button className="btn btn-secondary" onClick={() => onNavigate('settings')}>
+          Settings
+        </button>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px', marginBottom: '32px' }}>
-        {features.map(feature => (
-          <div key={feature.id} className="card" style={{ cursor: 'pointer' }} onClick={() => onNavigate(feature.view)}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-              <div style={{ width: '40px', height: '40px', borderRadius: '10px', background: 'var(--accent-light)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {feature.icon}
-              </div>
-              <div>
-                <h3 style={{ fontSize: '16px' }}>{feature.title}</h3>
-                <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{feature.subtitle}</p>
-              </div>
-            </div>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              {feature.description}
-            </p>
+      <div className="dashboard-summary">
+        <div className="card">
+          <div className="summary-label">Selected Repo</div>
+          <div className="summary-value">{selectedRepo?.name || 'None selected'}</div>
+          <div className="summary-sub">{selectedRepo?.path || 'Import a repository to begin.'}</div>
+        </div>
+        <div className="card">
+          <div className="summary-label">Last Scan</div>
+          <div className="summary-value">{lastScan}</div>
+          <div className="summary-sub">Run a full TD scan to update.</div>
+        </div>
+        <div className="card">
+          <div className="summary-label">TD Score</div>
+          <div className="summary-value">
+            {tdScore ?? '—'}
+            {typeof tdDelta === 'number' && (
+              <span className={`delta ${tdDelta >= 0 ? 'delta-up' : 'delta-down'}`}>
+                {tdDelta >= 0 ? '+' : ''}{tdDelta}
+              </span>
+            )}
           </div>
-        ))}
+          <div className="summary-sub">Bridge-Console</div>
+        </div>
       </div>
 
-      <div className="card">
+      <div className="dashboard-actions">
+        <div className="card">
+          <div className="card-header">
+            <h3 className="card-title">Quick Actions</h3>
+          </div>
+          <div className="action-grid">
+            <button className="btn btn-primary" onClick={() => navigateToScan('overview', true)} disabled={!selectedRepo}>
+              Run Full Scan
+            </button>
+            <button className="btn btn-secondary" onClick={() => navigateToScan('dead-code')} disabled={!selectedRepo}>
+              Remove Dead Code
+            </button>
+            <button className="btn btn-secondary" onClick={() => onNavigate('patch-batch')}>
+              Update Dependencies
+            </button>
+            <button className="btn btn-secondary" onClick={() => navigateToScan('circular')} disabled={!selectedRepo}>
+              Fix Circular Deps
+            </button>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-header">
+            <h3 className="card-title">Top Issues</h3>
+          </div>
+          <div className="issue-list">
+            <div className="issue-item">
+              <span>🔴 {scanResult?.circularDependencies.count ?? 0} circular dependencies</span>
+            </div>
+            <div className="issue-item">
+              <span>🟡 {scanResult?.dependencies.outdated.length ?? 0} outdated packages</span>
+            </div>
+            <div className="issue-item">
+              <span>🟡 {scanResult?.deadCode.deadFiles.length ?? 0} dead code files</span>
+            </div>
+            <div className="issue-item">
+              <span>🟢 Test coverage: {scanResult?.testCoverage.coveragePercentage ?? '—'}%</span>
+            </div>
+          </div>
+          <button className="btn btn-ghost" onClick={() => navigateToScan('overview')} disabled={!selectedRepo}>
+            View Details →
+          </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: '24px' }}>
         <div className="card-header">
           <h3 className="card-title">Repositories</h3>
           <button className="btn btn-primary btn-sm" onClick={handleImport}>
@@ -140,38 +149,16 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
             </button>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div className="repo-grid">
             {repositories.map(repo => (
               <div
                 key={repo.path}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '12px',
-                  padding: '12px',
-                  background: selectedRepo?.path === repo.path ? 'var(--accent-light)' : 'var(--bg-tertiary)',
-                  borderRadius: 'var(--radius-md)',
-                  border: selectedRepo?.path === repo.path ? '1px solid var(--accent)' : '1px solid transparent',
-                  opacity: repo.exists ? 1 : 0.5
-                }}
+                className={`repo-card ${selectedRepo?.path === repo.path ? 'active' : ''}`}
+                onClick={() => { selectRepository(repo); onNavigate('full-scan') }}
               >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2">
-                  <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-                </svg>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 500, marginBottom: '2px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    {repo.name}
-                    {!repo.exists && <span className="badge" style={{ background: 'var(--error)', color: '#fff', fontSize: '10px' }}>Missing</span>}
-                  </div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{repo.path}</div>
-                </div>
-                <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                  {(repo.languages ?? []).map(lang => (
-                    <span key={lang} className="badge badge-success" style={{ fontSize: '10px' }}>
-                      {LANGUAGE_LABELS[lang]}
-                    </span>
-                  ))}
-                  {repo.hasGit && <span className="badge badge-accent" style={{ fontSize: '10px' }}>git</span>}
+                <div>
+                  <div className="repo-title">{repo.name}</div>
+                  <div className="repo-path">{repo.path}</div>
                 </div>
                 <button
                   className="btn btn-ghost btn-icon"

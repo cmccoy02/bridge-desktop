@@ -4,16 +4,24 @@
   "description": "Tech debt management tool for developers",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc && vite build && electron-builder",
     "preview": "vite preview",
-    "electron:dev": "vite"
+    "electron:dev": "vite --host 127.0.0.1 --port 5173"
   },
   "dependencies": {
+    "dependency-cruiser": "^16.7.0",
     "electron-store": "^8.1.0",
+    "knip": "^5.26.0",
+    "nyc": "^15.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "semver": "^7.5.4"
+    "remark": "^15.0.0",
+    "remark-lint": "^9.1.2",
+    "semver": "^7.5.4",
+    "unimported": "^1.29.0",
+    "vis-network": "^9.1.9",
+    "webpack-bundle-analyzer": "^4.10.2"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

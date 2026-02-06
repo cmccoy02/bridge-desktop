@@ -7,12 +7,19 @@ import type {
   OutdatedPackage,
   PatchBatchConfig,
   PatchBatchResult,
+  SecurityPatchConfig,
+  SecurityPatchResult,
   RepoInfo,
   ScheduledJob,
+  SmartScanSchedule,
   JobResult,
   ScanResult,
   ScanProgress,
-  SecurityFinding
+  SecurityFinding,
+  FullScanResult,
+  DeadCodeReport,
+  DeadCodeExport,
+  BridgeConsoleSettings
 } from './index'
 
 declare global {
@@ -29,11 +36,19 @@ declare global {
       cleanupMissingRepos: () => Promise<Repository[]>
       getFileStats: (repoPath: string) => Promise<FileSizeStats>
       getCleanupReport: (repoPath: string) => Promise<CleanupReport>
+      detectDeadCode: (repoPath: string) => Promise<DeadCodeReport>
+      runFullScan: (repoPath: string) => Promise<FullScanResult>
+      onFullScanProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
+      deleteDeadFile: (repoPath: string, relativePath: string) => Promise<boolean>
+      cleanupDeadCode: (payload: { repoPath: string; deadFiles: string[]; unusedExports: DeadCodeExport[]; createPr?: boolean }) => Promise<any>
       getOutdatedPackages: (repoPath: string, language?: Language) => Promise<OutdatedPackage[]>
       runPatchBatch: (config: PatchBatchConfig) => Promise<PatchBatchResult>
+      runSecurityPatch: (config: SecurityPatchConfig) => Promise<SecurityPatchResult>
       onPatchBatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
       onPatchBatchWarning: (callback: (warning: { message: string; output: string }) => void) => () => void
       onPatchBatchLog: (callback: (entry: { message: string }) => void) => () => void
+      onSecurityPatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
+      onSecurityPatchLog: (callback: (entry: { message: string }) => void) => () => void
       getRepoInfo: (repoPath: string) => Promise<RepoInfo>
       checkProtectedBranch: (repoPath: string) => Promise<boolean>
       getScheduledJobs: () => Promise<ScheduledJob[]>
@@ -42,10 +57,18 @@ declare global {
       deleteScheduledJob: (jobId: string) => Promise<boolean>
       getJobResults: (jobId?: string) => Promise<JobResult[]>
       onSchedulerJobStarted: (callback: (data: { jobId: string; repoName: string }) => void) => () => void
+      getSmartScanSchedules: () => Promise<SmartScanSchedule[]>
+      addSmartScanSchedule: (payload: { repoPath: string; repoName: string }) => Promise<SmartScanSchedule>
+      updateSmartScanSchedule: (id: string, updates: Partial<SmartScanSchedule>) => Promise<SmartScanSchedule | null>
+      deleteSmartScanSchedule: (id: string) => Promise<boolean>
+      onSmartScanStarted: (callback: (data: { id: string; repoName: string }) => void) => () => void
       checkSecurityScannerAvailable: () => Promise<boolean>
       runSecurityScan: (repoPath: string) => Promise<ScanResult>
       generateSecurityFix: (finding: SecurityFinding) => Promise<string | null>
       onSecurityScanProgress: (callback: (progress: ScanProgress) => void) => () => void
+      getBridgeConsoleSettings: () => Promise<BridgeConsoleSettings>
+      saveBridgeConsoleSettings: (settings: BridgeConsoleSettings) => Promise<BridgeConsoleSettings>
+      testBridgeConsoleConnection: (settings: BridgeConsoleSettings) => Promise<{ ok: boolean; message?: string }>
     }
   }
 }

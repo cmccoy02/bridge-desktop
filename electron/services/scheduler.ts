@@ -3,7 +3,7 @@ import { BrowserWindow } from 'electron'
 
 const store = new Store()
 
-export type ScheduleFrequency = 'daily' | 'weekly' | 'monthly'
+export type ScheduleFrequency = 'hourly' | 'daily' | 'weekly' | 'monthly'
 
 export interface ScheduledJob {
   id: string
@@ -34,6 +34,11 @@ const RESULTS_KEY = 'job-results'
 
 // Timer references for cleanup
 const jobTimers: Map<string, NodeJS.Timeout> = new Map()
+let jobExecutor: ((job: ScheduledJob) => Promise<JobResult | null>) | null = null
+
+export function setSchedulerExecutor(executor: (job: ScheduledJob) => Promise<JobResult | null>): void {
+  jobExecutor = executor
+}
 
 export function getScheduledJobs(): ScheduledJob[] {
   return store.get(JOBS_KEY, []) as ScheduledJob[]
@@ -125,6 +130,10 @@ function calculateNextRun(frequency: ScheduleFrequency): string {
   let next: Date
 
   switch (frequency) {
+    case 'hourly':
+      next = new Date(now.getTime() + 60 * 60 * 1000)
+      next.setMinutes(0, 0, 0) // top of the hour
+      break
     case 'daily':
       next = new Date(now.getTime() + 24 * 60 * 60 * 1000)
       next.setHours(3, 0, 0, 0) // 3 AM
@@ -201,10 +210,21 @@ async function executeJob(jobId: string): Promise<void> {
     win.webContents.send('scheduler-job-started', { jobId, repoName: job.repoName })
   }
 
-  // The actual job execution will be handled by the main process
-  // This is a placeholder that will be called from main.ts
-  for (const win of windows) {
-    win.webContents.send('scheduler-execute-job', job)
+  if (jobExecutor) {
+    try {
+      const result = await jobExecutor(job)
+      if (result) {
+        addJobResult(result)
+      }
+    } catch (error) {
+      addJobResult({
+        jobId: job.id,
+        success: false,
+        timestamp: new Date().toISOString(),
+        updatedPackages: [],
+        error: error instanceof Error ? error.message : 'Scheduled job failed'
+      })
+    }
   }
 
   // Update job with new next run time

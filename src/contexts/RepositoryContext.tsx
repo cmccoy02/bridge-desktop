@@ -25,9 +25,7 @@ export function RepositoryProvider({ children }: { children: React.ReactNode }) 
 
   const loadRepositories = async () => {
     try {
-      const repos = await window.bridge.getRepositories()
-      // Filter out missing repos
-      const existingRepos = repos.filter((r: Repository) => r.exists)
+      const existingRepos = await window.bridge.cleanupMissingRepos()
       setRepositories(existingRepos)
 
       // If selected repo no longer exists, deselect it

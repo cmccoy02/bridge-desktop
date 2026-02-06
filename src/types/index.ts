@@ -1,5 +1,5 @@
 export type Language = 'javascript' | 'python' | 'ruby' | 'elixir' | 'unknown'
-export type ScheduleFrequency = 'daily' | 'weekly' | 'monthly'
+export type ScheduleFrequency = 'hourly' | 'daily' | 'weekly' | 'monthly'
 
 export interface Repository {
   path: string
@@ -61,6 +61,23 @@ export interface PatchBatchResult {
   testOutput?: string
 }
 
+export interface SecurityPatchConfig {
+  repoPath: string
+  branchName: string
+  createPR: boolean
+  runTests: boolean
+  testCommand?: string
+}
+
+export interface SecurityPatchResult {
+  success: boolean
+  updatedPackages: string[]
+  failedPackages: string[]
+  prUrl?: string | null
+  error?: string
+  testsPassed?: boolean
+}
+
 export interface LargeFile {
   path: string
   size: number
@@ -100,6 +117,17 @@ export interface ScheduledJob {
   language: string
   createPR: boolean
   runTests: boolean
+  createdAt: string
+}
+
+export interface SmartScanSchedule {
+  id: string
+  repoPath: string
+  repoName: string
+  enabled: boolean
+  quietHour: number
+  lastRun: string | null
+  nextRun: string
   createdAt: string
 }
 
@@ -146,4 +174,107 @@ export interface ScanProgress {
   currentFile?: string
 }
 
-export type View = 'dashboard' | 'files' | 'patch-batch' | 'cleanup' | 'scheduler' | 'security'
+export interface VulnerabilitySummary {
+  critical: number
+  high: number
+  medium: number
+  low: number
+  total: number
+}
+
+export interface DependencyReport {
+  outdated: OutdatedPackage[]
+  vulnerabilities: VulnerabilitySummary
+  error?: string
+}
+
+export interface CircularDependency {
+  from: string
+  to: string
+  cycle: string[]
+}
+
+export interface CircularDependencyReport {
+  count: number
+  dependencies: CircularDependency[]
+  error?: string
+}
+
+export interface DeadCodeExport {
+  file: string
+  exportName: string
+}
+
+export interface DeadCodeReport {
+  deadFiles: string[]
+  unusedExports: DeadCodeExport[]
+  totalDeadCodeCount: number
+  raw?: {
+    knip?: string
+    unimported?: string
+  }
+  error?: string
+}
+
+export interface BundleModule {
+  name: string
+  size: number
+  sizeFormatted: string
+}
+
+export interface BundleAnalysisReport {
+  totalSize: number
+  totalSizeFormatted: string
+  largestModules: BundleModule[]
+  previousSize?: number
+  delta?: number
+  deltaPercent?: number
+  warning?: boolean
+  statsPath?: string
+  error?: string
+}
+
+export interface TestCoverageReport {
+  coveragePercentage: number | null
+  uncoveredCriticalFiles: { file: string; coverage: number }[]
+  summaryPath?: string
+  error?: string
+}
+
+export interface DocumentationDebtReport {
+  missingReadmeSections: string[]
+  readmeOutdated: boolean
+  daysSinceUpdate: number
+  undocumentedFunctions: number
+  error?: string
+}
+
+export interface ConsoleUploadResult {
+  success: boolean
+  tdScore?: number
+  tdDelta?: number
+  error?: string
+}
+
+export interface FullScanResult {
+  scanDate: string
+  repository: string
+  repositoryUrl?: string | null
+  dependencies: DependencyReport
+  circularDependencies: CircularDependencyReport
+  deadCode: DeadCodeReport
+  bundleSize: BundleAnalysisReport
+  testCoverage: TestCoverageReport
+  documentation: DocumentationDebtReport
+  consoleUpload?: ConsoleUploadResult
+  durationMs: number
+}
+
+export interface BridgeConsoleSettings {
+  consoleUrl: string
+  apiToken: string
+  githubUsername: string
+  autoUpload: boolean
+}
+
+export type View = 'dashboard' | 'files' | 'patch-batch' | 'cleanup' | 'scheduler' | 'security' | 'full-scan' | 'settings'
