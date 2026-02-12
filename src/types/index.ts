@@ -17,6 +17,8 @@ export interface OutdatedPackage {
   latest: string
   type: 'dependencies' | 'devDependencies'
   hasPatchUpdate: boolean
+  isNonBreaking: boolean
+  updateType: 'patch' | 'minor' | 'major' | 'unknown'
   language: Language
 }
 
@@ -38,10 +40,37 @@ export interface RepoInfo {
   behind: number
 }
 
+export interface ConflictWarning {
+  severity: 'high' | 'medium'
+  message: string
+  recommendation: string
+  conflictingFiles: string[]
+  behindBy: number
+}
+
+export interface GitHubCliStatus {
+  installed: boolean
+  authenticated: boolean
+  account?: string
+  message?: string
+}
+
 export interface PatchBatchConfig {
   repoPath: string
   branchName: string
   packages: { name: string; language: Language }[]
+  createPR: boolean
+  runTests: boolean
+  updateStrategy?: 'wanted' | 'latest'
+  testCommand?: string
+  testTimeoutMs?: number
+  prTitle?: string
+  prBody?: string
+}
+
+export interface NonBreakingUpdateConfig {
+  repoPath: string
+  branchName: string
   createPR: boolean
   runTests: boolean
   testCommand?: string
@@ -275,6 +304,11 @@ export interface BridgeConsoleSettings {
   apiToken: string
   githubUsername: string
   autoUpload: boolean
+}
+
+export interface AppSettings {
+  experimentalFeatures: boolean
+  onboardingCompleted: boolean
 }
 
 export type View = 'dashboard' | 'files' | 'patch-batch' | 'cleanup' | 'scheduler' | 'security' | 'full-scan' | 'settings'

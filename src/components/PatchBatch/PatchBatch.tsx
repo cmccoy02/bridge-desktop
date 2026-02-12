@@ -1,31 +1,29 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { OutdatedPackage, SecurityPatchResult } from '../../types'
+import type { ConflictWarning, OutdatedPackage, PatchBatchResult, SecurityPatchResult } from '../../types'
 import Scheduler from '../Scheduler/Scheduler'
 
 export default function PatchBatch() {
   const { selectedRepo } = useRepositories()
   const [packages, setPackages] = useState<OutdatedPackage[]>([])
-  const [selectedPackages, setSelectedPackages] = useState<Set<string>>(new Set())
+  const [selectedMajorPackages, setSelectedMajorPackages] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<{ message: string; step: number; total: number } | null>(null)
-  const [result, setResult] = useState<{
-    success: boolean
-    prUrl?: string | null
-    branchName?: string
-    error?: string
-    testsPassed?: boolean
-  } | null>(null)
+  const [result, setResult] = useState<PatchBatchResult | null>(null)
+  const [activeRunType, setActiveRunType] = useState<'non-breaking' | 'major' | null>(null)
+
   const [branchName, setBranchName] = useState('bridge-update-deps')
-  const [createPR, setCreatePR] = useState(true)
+  const [createPR, setCreatePR] = useState(false)
   const [runTests, setRunTests] = useState(true)
   const [repoInfo, setRepoInfo] = useState<{ branch: string; isProtectedBranch: boolean } | null>(null)
+  const [conflictWarnings, setConflictWarnings] = useState<ConflictWarning[]>([])
   const [outputLines, setOutputLines] = useState<string[]>([])
   const [testCommand, setTestCommand] = useState('')
   const [testCommandDetected, setTestCommandDetected] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [showScheduler, setShowScheduler] = useState(false)
+
   const [securityRunning, setSecurityRunning] = useState(false)
   const [securityProgress, setSecurityProgress] = useState<{ message: string; step: number; total: number } | null>(null)
   const [securityResult, setSecurityResult] = useState<SecurityPatchResult | null>(null)
@@ -33,11 +31,21 @@ export default function PatchBatch() {
 
   const getPackageKey = (pkg: OutdatedPackage) => `${pkg.language}:${pkg.name}`
 
+  const nonBreakingPackages = useMemo(
+    () => packages.filter(pkg => pkg.isNonBreaking),
+    [packages]
+  )
+  const majorPackages = useMemo(
+    () => packages.filter(pkg => pkg.updateType === 'major'),
+    [packages]
+  )
+
   useEffect(() => {
     if (selectedRepo) {
-      loadOutdatedPackages()
-      loadRepoInfo()
-      detectTestCommand()
+      void loadOutdatedPackages()
+      void loadRepoInfo()
+      void detectTestCommand()
+      void loadMergeConflictWarnings()
     }
   }, [selectedRepo])
 
@@ -82,6 +90,7 @@ export default function PatchBatch() {
       ruby: 'bundle exec rspec',
       elixir: 'mix test'
     }
+
     try {
       const [packageJsonRaw, files] = await Promise.all([
         window.bridge.readFile(`${selectedRepo.path}/package.json`),
@@ -118,6 +127,20 @@ export default function PatchBatch() {
     }
   }
 
+  const loadMergeConflictWarnings = async () => {
+    if (!selectedRepo || !selectedRepo.hasGit) {
+      setConflictWarnings([])
+      return
+    }
+
+    try {
+      const warnings = await window.bridge.predictMergeConflicts(selectedRepo.path)
+      setConflictWarnings(warnings)
+    } catch {
+      setConflictWarnings([])
+    }
+  }
+
   const loadOutdatedPackages = async (options?: { preserveResult?: boolean }) => {
     if (!selectedRepo) return
 
@@ -126,51 +149,47 @@ export default function PatchBatch() {
       setResult(null)
     }
     setLoadError(null)
+
     try {
       const outdated = await window.bridge.getOutdatedPackages(selectedRepo.path)
       setPackages(outdated)
 
-      const patchPackages = outdated.filter(p => p.hasPatchUpdate).map(getPackageKey)
-      setSelectedPackages(new Set(patchPackages))
+      const defaultMajorSelection = outdated
+        .filter(pkg => pkg.updateType === 'major')
+        .map(getPackageKey)
+      setSelectedMajorPackages(new Set(defaultMajorSelection))
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load outdated packages'
       setLoadError(message)
       setPackages([])
-      setSelectedPackages(new Set())
+      setSelectedMajorPackages(new Set())
     } finally {
       setLoading(false)
     }
   }
 
-  const togglePackage = (pkg: OutdatedPackage) => {
-    if (!pkg.hasPatchUpdate) return
+  const toggleMajorPackage = (pkg: OutdatedPackage) => {
+    if (pkg.updateType !== 'major') return
     const key = getPackageKey(pkg)
-    const next = new Set(selectedPackages)
+    const next = new Set(selectedMajorPackages)
     if (next.has(key)) {
       next.delete(key)
     } else {
       next.add(key)
     }
-    setSelectedPackages(next)
+    setSelectedMajorPackages(next)
   }
 
-  const selectAll = () => {
-    const patchPackages = packages.filter(p => p.hasPatchUpdate).map(getPackageKey)
-    setSelectedPackages(new Set(patchPackages))
-  }
-
-  const clearSelection = () => {
-    setSelectedPackages(new Set())
-  }
-
-  const runPatchBatch = async () => {
-    if (!selectedRepo || selectedPackages.size === 0) return
+  const runNonBreakingUpdates = async () => {
+    if (!selectedRepo) return
 
     if (!selectedRepo.hasGit) {
-      setResult({
-        success: false,
-        error: "Git not initialized - run 'git init' first."
-      })
+      setResult({ success: false, error: "Git not initialized - run 'git init' first." })
+      return
+    }
+
+    if (nonBreakingPackages.length === 0) {
+      setResult({ success: false, error: 'No non-breaking updates available.' })
       return
     }
 
@@ -184,41 +203,101 @@ export default function PatchBatch() {
       return
     }
 
+    setActiveRunType('non-breaking')
     setRunning(true)
     setProgress(null)
     setResult(null)
     setOutputLines([])
 
     try {
-      const packagesToUpdate = packages
-        .filter(p => selectedPackages.has(getPackageKey(p)))
-        .map(p => ({ name: p.name, language: p.language }))
-
-      const result = await window.bridge.runPatchBatch({
+      const nextResult = await window.bridge.runNonBreakingUpdate({
         repoPath: selectedRepo.path,
-        branchName: `${branchName}-${Date.now()}`,
-        packages: packagesToUpdate,
+        branchName: `${branchName}-non-breaking-${Date.now()}`,
         createPR,
         runTests,
         testCommand: testCommand.trim() || undefined,
-        prTitle: `chore(deps): update ${packagesToUpdate.length} packages to latest patch versions`,
-        prBody: `## Summary\nAutomated patch version updates via Bridge.\n\n### Updated packages\n${packagesToUpdate.map(p => `- ${p.name} (${p.language})`).join('\n')}`
+        prTitle: 'chore(deps): apply non-breaking dependency updates',
+        prBody: 'Automated patch/minor dependency updates via Bridge.'
       })
 
-      setResult(result)
+      setResult(nextResult)
 
-      if (result.success) {
+      if (nextResult.success) {
         await loadOutdatedPackages({ preserveResult: true })
         await loadRepoInfo()
+        await loadMergeConflictWarnings()
       }
     } catch (error) {
       setResult({
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: error instanceof Error ? error.message : 'Non-breaking update failed'
       })
     } finally {
       setRunning(false)
       setProgress(null)
+      setActiveRunType(null)
+    }
+  }
+
+  const runMajorUpdates = async () => {
+    if (!selectedRepo) return
+
+    if (!selectedRepo.hasGit) {
+      setResult({ success: false, error: "Git not initialized - run 'git init' first." })
+      return
+    }
+
+    const selected = majorPackages.filter(pkg => selectedMajorPackages.has(getPackageKey(pkg)))
+    if (selected.length === 0) {
+      setResult({ success: false, error: 'Select at least one major update package.' })
+      return
+    }
+
+    const isJavascriptRepo = (selectedRepo.languages ?? []).includes('javascript')
+    if (runTests && isJavascriptRepo && testCommand.trim().length === 0) {
+      setResult({
+        success: false,
+        error: "No test script found - add one to package.json or uncheck 'Run tests'.",
+        testsPassed: false
+      })
+      return
+    }
+
+    setActiveRunType('major')
+    setRunning(true)
+    setProgress(null)
+    setResult(null)
+    setOutputLines([])
+
+    try {
+      const nextResult = await window.bridge.runPatchBatch({
+        repoPath: selectedRepo.path,
+        branchName: `${branchName}-major-${Date.now()}`,
+        packages: selected.map(pkg => ({ name: pkg.name, language: pkg.language })),
+        createPR,
+        runTests,
+        updateStrategy: 'latest',
+        testCommand: testCommand.trim() || undefined,
+        prTitle: `chore(deps): update ${selected.length} major dependency versions`,
+        prBody: `## Summary\nMajor dependency upgrades via Bridge.\n\n### Updated packages\n${selected.map(pkg => `- ${pkg.name}`).join('\n')}`
+      })
+
+      setResult(nextResult)
+
+      if (nextResult.success) {
+        await loadOutdatedPackages({ preserveResult: true })
+        await loadRepoInfo()
+        await loadMergeConflictWarnings()
+      }
+    } catch (error) {
+      setResult({
+        success: false,
+        error: error instanceof Error ? error.message : 'Major update failed'
+      })
+    } finally {
+      setRunning(false)
+      setProgress(null)
+      setActiveRunType(null)
     }
   }
 
@@ -231,7 +310,7 @@ export default function PatchBatch() {
     setSecurityLogs([])
 
     try {
-      const result = await window.bridge.runSecurityPatch({
+      const nextResult = await window.bridge.runSecurityPatch({
         repoPath: selectedRepo.path,
         branchName: `bridge-security-patch-${Date.now()}`,
         createPR,
@@ -239,11 +318,12 @@ export default function PatchBatch() {
         testCommand: testCommand.trim() || undefined
       })
 
-      setSecurityResult(result)
+      setSecurityResult(nextResult)
 
-      if (result.success) {
+      if (nextResult.success) {
         await loadOutdatedPackages({ preserveResult: true })
         await loadRepoInfo()
+        await loadMergeConflictWarnings()
       }
     } catch (error) {
       setSecurityResult({
@@ -279,27 +359,13 @@ export default function PatchBatch() {
           <line x1="12" y1="8" x2="12" y2="12" />
           <line x1="12" y1="16" x2="12.01" y2="16" />
         </svg>
-        <h3 className="empty-state-title">No package.json found</h3>
-        <p className="empty-state-desc">Is this a Node.js project?</p>
+        <h3 className="empty-state-title">No package manager detected</h3>
+        <p className="empty-state-desc">This repository does not have a supported dependency manifest.</p>
       </div>
     )
   }
 
-  const patchUpdatesCount = packages.filter(p => p.hasPatchUpdate).length
   const isJavascriptRepo = (selectedRepo.languages ?? []).includes('javascript')
-  const runButtonLabel = () => {
-    if (running) {
-      const message = progress?.message?.toLowerCase() || ''
-      if (message.includes('test')) return 'Running tests...'
-      if (message.includes('pull request') || message.includes('pr')) return 'Creating PR...'
-      if (message.includes('commit')) return 'Committing updates...'
-      return progress?.message || 'Running update...'
-    }
-
-    if (selectedPackages.size === 0) return 'Select packages to update'
-
-    return `Update ${selectedPackages.size} Package${selectedPackages.size === 1 ? '' : 's'}`
-  }
 
   return (
     <div className="fade-in">
@@ -308,37 +374,12 @@ export default function PatchBatch() {
           <div>
             <h2 style={{ marginBottom: '4px' }}>Update Dependencies</h2>
             <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
-              Point Bridge at a repo, review patch updates, run tests, and create a clean PR.
+              Non-breaking updates are automated. Major updates require explicit package selection.
             </p>
           </div>
-          <button
-            className="btn btn-secondary btn-sm"
-            onClick={() => loadOutdatedPackages()}
-            disabled={loading}
-          >
-            {loading ? <div className="spinner" style={{ width: '14px', height: '14px' }} /> : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M23 4v6h-6M1 20v-6h6" />
-                <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
-              </svg>
-            )}
-            Refresh
+          <button className="btn btn-secondary btn-sm" onClick={() => void loadOutdatedPackages()} disabled={loading}>
+            {loading ? <div className="spinner" style={{ width: '14px', height: '14px' }} /> : 'Refresh'}
           </button>
-        </div>
-
-        <div className="step-guide">
-          <div className="step-item">
-            <span className="step-number">1</span>
-            <span>Select Repository</span>
-          </div>
-          <div className="step-item">
-            <span className="step-number">2</span>
-            <span>Review Outdated Packages</span>
-          </div>
-          <div className="step-item">
-            <span className="step-number">3</span>
-            <span>Run Update (with tests)</span>
-          </div>
         </div>
 
         {!selectedRepo.hasGit && (
@@ -351,16 +392,27 @@ export default function PatchBatch() {
 
         {repoInfo?.isProtectedBranch && (
           <div className="card" style={{ marginBottom: '16px', borderColor: 'var(--warning)', background: 'rgba(245, 158, 11, 0.1)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--warning)' }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                <line x1="12" y1="9" x2="12" y2="13" />
-                <line x1="12" y1="17" x2="12.01" y2="17" />
-              </svg>
-              <span>You're on <strong>{repoInfo.branch}</strong> (protected). Bridge will create a new branch automatically.</span>
+            <div style={{ color: 'var(--warning)' }}>
+              You're on <strong>{repoInfo.branch}</strong> (protected). Bridge will create a new branch automatically.
             </div>
           </div>
         )}
+
+        {conflictWarnings.map((warning, index) => (
+          <div
+            key={`${warning.message}-${index}`}
+            className="card"
+            style={{
+              marginBottom: '16px',
+              borderColor: warning.severity === 'high' ? 'var(--error)' : 'var(--warning)',
+              background: warning.severity === 'high' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(245, 158, 11, 0.1)'
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: '8px' }}>Merge conflict risk</div>
+            <div style={{ marginBottom: '8px' }}>{warning.message}</div>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{warning.recommendation}</div>
+          </div>
+        ))}
 
         {loadError && (
           <div className="card" style={{ marginBottom: '16px', borderColor: 'var(--error)', background: 'rgba(239, 68, 68, 0.1)' }}>
@@ -370,15 +422,89 @@ export default function PatchBatch() {
 
         <div className="card" style={{ marginBottom: '16px' }}>
           <div className="card-header">
+            <h3 className="card-title">Non-Breaking Updates (Patch + Minor)</h3>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => void runNonBreakingUpdates()}
+              disabled={running || nonBreakingPackages.length === 0 || !selectedRepo.hasGit}
+            >
+              {running && activeRunType === 'non-breaking' ? 'Running...' : `Update ${nonBreakingPackages.length} Packages`}
+            </button>
+          </div>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+            Runs the clean install/update sequence Marcus recommended, from inside the project context.
+          </p>
+        </div>
+
+        <div className="card" style={{ marginBottom: '16px' }}>
+          <div className="card-header">
+            <h3 className="card-title">Major Updates (Manual Selection)</h3>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => void runMajorUpdates()}
+              disabled={running || selectedMajorPackages.size === 0 || !selectedRepo.hasGit}
+            >
+              {running && activeRunType === 'major' ? 'Running...' : `Update ${selectedMajorPackages.size} Major Packages`}
+            </button>
+          </div>
+          {majorPackages.length === 0 ? (
+            <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>No major updates available.</div>
+          ) : (
+            <div className="package-table-wrapper">
+              <table className="package-table">
+                <thead>
+                  <tr>
+                    <th />
+                    <th>Package Name</th>
+                    <th>Current</th>
+                    <th>Latest</th>
+                    <th>Type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {majorPackages.map(pkg => {
+                    const key = getPackageKey(pkg)
+                    const isSelected = selectedMajorPackages.has(key)
+                    return (
+                      <tr
+                        key={key}
+                        className={isSelected ? 'selected' : ''}
+                        onClick={() => toggleMajorPackage(pkg)}
+                      >
+                        <td>
+                          <div className={`checkbox ${isSelected ? 'checked' : ''}`}>
+                            {isSelected && (
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                            )}
+                          </div>
+                        </td>
+                        <td>
+                          <div className="package-name-cell">
+                            <div className="package-name">{pkg.name}</div>
+                            <span className="badge badge-warning">major</span>
+                          </div>
+                        </td>
+                        <td>{pkg.current}</td>
+                        <td className="version-new">{pkg.latest}</td>
+                        <td>{pkg.type === 'devDependencies' ? 'devDep' : 'dep'}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="card" style={{ marginBottom: '16px' }}>
+          <div className="card-header">
             <h3 className="card-title">Security Vulnerability Auto-Patcher</h3>
-            <button className="btn btn-primary btn-sm" onClick={runSecurityPatch} disabled={securityRunning || !selectedRepo.hasGit}>
+            <button className="btn btn-primary btn-sm" onClick={() => void runSecurityPatch()} disabled={securityRunning || !selectedRepo.hasGit}>
               {securityRunning ? 'Patching...' : 'Patch High/Critical'}
             </button>
           </div>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '12px' }}>
-            Runs npm audit, updates high/critical vulnerabilities one-by-one, and creates a PR when tests pass.
-          </p>
-
           {securityProgress && (
             <div style={{ marginBottom: '12px' }}>
               <div style={{ fontSize: '13px', marginBottom: '6px' }}>{securityProgress.message}</div>
@@ -387,40 +513,18 @@ export default function PatchBatch() {
               </div>
             </div>
           )}
-
           {securityResult && (
             <div className="card" style={{
               borderColor: securityResult.success ? 'var(--success)' : 'var(--error)',
               background: securityResult.success ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
               padding: '12px'
             }}>
-              {securityResult.success ? (
-                <div style={{ color: 'var(--success)' }}>
-                  Patched {securityResult.updatedPackages.length} packages.{securityResult.prUrl ? ' PR created.' : ''}
-                </div>
-              ) : (
-                <div style={{ color: 'var(--error)' }}>
-                  {securityResult.error || 'Security patch failed.'}
-                </div>
-              )}
-              {securityResult.prUrl && (
-                <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  PR: {securityResult.prUrl}
-                </div>
-              )}
-              {securityResult.failedPackages.length > 0 && (
-                <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  Failed: {securityResult.failedPackages.join(', ')}
-                </div>
-              )}
+              {securityResult.success ? 'Security patch run succeeded.' : securityResult.error || 'Security patch failed.'}
             </div>
           )}
-
           {securityLogs.length > 0 && (
-            <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
-              {securityLogs.slice(-4).map((line, i) => (
-                <div key={`${line}-${i}`}>{line}</div>
-              ))}
+            <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+              {securityLogs.slice(-4).map((line, i) => <div key={`${line}-${i}`}>{line}</div>)}
             </div>
           )}
         </div>
@@ -437,28 +541,20 @@ export default function PatchBatch() {
             {result.success ? (
               <div>
                 <div style={{ fontWeight: 600, marginBottom: '8px', color: 'var(--success)' }}>
-                  {result.prUrl ? '✓ PR Created Successfully' : `✓ Updates committed to branch '${result.branchName}'`}
+                  {result.prUrl ? 'PR created successfully.' : `Updates committed to branch '${result.branchName}'.`}
                 </div>
                 {result.prUrl && (
                   <div style={{ fontSize: '13px' }}>
-                    Pull request created:{' '}
-                    <a href={result.prUrl} target="_blank" rel="noopener noreferrer">
-                      {result.prUrl}
-                    </a>
+                    PR: <a href={result.prUrl} target="_blank" rel="noopener noreferrer">{result.prUrl}</a>
                   </div>
                 )}
               </div>
             ) : (
               <div style={{ color: 'var(--error)' }}>
                 <div style={{ fontWeight: 600, marginBottom: '4px' }}>
-                  {result.testsPassed === false ? '✗ Tests Failed - No PR created' : 'Update failed'}
+                  {result.testsPassed === false ? 'Tests failed - no PR created' : 'Update failed'}
                 </div>
                 <div style={{ fontSize: '13px' }}>{result.error}</div>
-                {result.branchName && (
-                  <div style={{ fontSize: '12px', marginTop: '6px', color: 'var(--text-secondary)' }}>
-                    Branch available: {result.branchName}
-                  </div>
-                )}
               </div>
             )}
           </div>
@@ -493,30 +589,24 @@ export default function PatchBatch() {
               value={branchName}
               onChange={e => setBranchName(e.target.value)}
               placeholder="bridge-update-deps"
-              style={{ maxWidth: '300px' }}
+              style={{ maxWidth: '320px' }}
             />
           </div>
 
           <div className="config-grid">
             <label className="checkbox-wrapper">
-              <div
-                className={`checkbox ${createPR ? 'checked' : ''}`}
-                onClick={() => setCreatePR(!createPR)}
-              >
+              <div className={`checkbox ${createPR ? 'checked' : ''}`} onClick={() => setCreatePR(!createPR)}>
                 {createPR && (
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
                     <polyline points="20 6 9 17 4 12" />
                   </svg>
                 )}
               </div>
-              <span className="checkbox-label">Create pull request</span>
+              <span className="checkbox-label">Create pull request (off by default)</span>
             </label>
 
             <label className="checkbox-wrapper">
-              <div
-                className={`checkbox ${runTests ? 'checked' : ''}`}
-                onClick={() => setRunTests(!runTests)}
-              >
+              <div className={`checkbox ${runTests ? 'checked' : ''}`} onClick={() => setRunTests(!runTests)}>
                 {runTests && (
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
                     <polyline points="20 6 9 17 4 12" />
@@ -546,7 +636,7 @@ export default function PatchBatch() {
             />
             {runTests && testCommandDetected && (
               <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                Detected command - will run: {testCommand}
+                Detected command: {testCommand}
               </div>
             )}
             {runTests && isJavascriptRepo && !testCommandDetected && (
@@ -556,110 +646,6 @@ export default function PatchBatch() {
             )}
           </div>
         </div>
-      </div>
-
-      <div className="card" style={{ marginBottom: '24px' }}>
-        <div className="card-header">
-          <div>
-            <h3 className="card-title">Outdated Packages</h3>
-            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              {patchUpdatesCount > 0
-                ? `${patchUpdatesCount} patch update${patchUpdatesCount !== 1 ? 's' : ''} available`
-                : 'No patch updates detected'}
-            </div>
-          </div>
-          <div className="table-actions">
-            <span style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>
-              {selectedPackages.size} selected
-            </span>
-            <button className="btn btn-ghost btn-sm" onClick={selectAll}>
-              Select All
-            </button>
-            <button className="btn btn-ghost btn-sm" onClick={clearSelection}>
-              Deselect All
-            </button>
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={runPatchBatch}
-              disabled={selectedPackages.size === 0 || running || !selectedRepo.hasGit}
-            >
-              {running ? (
-                <>
-                  <div className="spinner" style={{ width: '14px', height: '14px', borderTopColor: '#000' }} />
-                  {runButtonLabel()}
-                </>
-              ) : (
-                <>
-                  {runButtonLabel()}
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-
-        {loading ? (
-          <div style={{ display: 'flex', justifyContent: 'center', padding: '40px' }}>
-            <div className="spinner" />
-          </div>
-        ) : packages.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ margin: '0 auto 16px', opacity: 0.5 }}>
-              <circle cx="12" cy="12" r="10" />
-              <path d="M9 12l2 2 4-4" />
-            </svg>
-            <div>All packages are up to date!</div>
-          </div>
-        ) : (
-          <div className="package-table-wrapper">
-            <table className="package-table">
-              <thead>
-                <tr>
-                  <th />
-                  <th>Package Name</th>
-                  <th>Current</th>
-                  <th>Latest</th>
-                  <th>Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                {packages.map(pkg => {
-                  const key = getPackageKey(pkg)
-                  const isSelected = selectedPackages.has(key)
-                  const latestDisplay = pkg.hasPatchUpdate ? pkg.wanted : pkg.latest
-                  return (
-                    <tr
-                      key={key}
-                      className={`${pkg.hasPatchUpdate ? '' : 'disabled'} ${isSelected ? 'selected' : ''}`}
-                      onClick={() => togglePackage(pkg)}
-                    >
-                      <td>
-                        <div className={`checkbox ${isSelected ? 'checked' : ''}`}>
-                          {isSelected && (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
-                              <polyline points="20 6 9 17 4 12" />
-                            </svg>
-                          )}
-                        </div>
-                      </td>
-                      <td>
-                        <div className="package-name-cell">
-                          <div className="package-name">{pkg.name}</div>
-                          {!pkg.hasPatchUpdate && (
-                            <span className="badge badge-warning">minor/major</span>
-                          )}
-                        </div>
-                      </td>
-                      <td>{pkg.current}</td>
-                      <td className={pkg.hasPatchUpdate ? 'version-new' : ''}>{latestDisplay}</td>
-                      <td>{pkg.type === 'devDependencies' ? 'devDep' : 'dep'}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-
       </div>
 
       <div className="card">

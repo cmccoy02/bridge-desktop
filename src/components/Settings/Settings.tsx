@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAppSettings } from '../../contexts/AppSettingsContext'
 import type { BridgeConsoleSettings } from '../../types'
 
 const emptySettings: BridgeConsoleSettings = {
@@ -9,9 +10,11 @@ const emptySettings: BridgeConsoleSettings = {
 }
 
 export default function Settings() {
+  const { settings: appSettings, saveSettings: saveAppSettings, loading: appSettingsLoading } = useAppSettings()
   const [settings, setSettings] = useState<BridgeConsoleSettings>(emptySettings)
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [message, setMessage] = useState<string | null>(null)
+  const [savingAppSettings, setSavingAppSettings] = useState(false)
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -55,6 +58,18 @@ export default function Settings() {
     } catch (error) {
       setConnectionStatus('error')
       setMessage(error instanceof Error ? error.message : 'Connection failed')
+    }
+  }
+
+  const toggleExperimentalFeatures = async (enabled: boolean) => {
+    setSavingAppSettings(true)
+    try {
+      await saveAppSettings({ experimentalFeatures: enabled })
+      setMessage('App settings saved.')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to save app settings')
+    } finally {
+      setSavingAppSettings(false)
     }
   }
 
@@ -138,6 +153,40 @@ export default function Settings() {
           <div className="alert warn">
             For security, tokens are stored locally on this machine using Electron Store.
           </div>
+        </div>
+
+        <div className="card" style={{ padding: '20px' }}>
+          <h3 style={{ marginBottom: '12px' }}>Feature Flags</h3>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginBottom: '16px' }}>
+            Experimental features include Security Scan and Full TD Scan. Keep disabled for a simplified out-of-the-box workflow.
+          </p>
+          <label className="simple-checkbox">
+            <input
+              type="checkbox"
+              checked={appSettings.experimentalFeatures}
+              onChange={(e) => toggleExperimentalFeatures(e.target.checked)}
+              disabled={appSettingsLoading || savingAppSettings}
+            />
+            <span className="checkbox-label">
+              Enable experimental features
+            </span>
+          </label>
+          <div style={{ marginTop: '10px', color: 'var(--text-tertiary)', fontSize: '12px' }}>
+            Default: disabled
+          </div>
+          <div style={{ marginTop: '16px', color: 'var(--text-secondary)', fontSize: '13px' }}>
+            First-run checklist: {appSettings.onboardingCompleted ? 'completed' : 'pending'}
+          </div>
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ marginTop: '8px' }}
+            onClick={async () => {
+              await saveAppSettings({ onboardingCompleted: false })
+              setMessage('First-run checklist reset.')
+            }}
+          >
+            Reset First-Run Checklist
+          </button>
         </div>
       </div>
     </div>

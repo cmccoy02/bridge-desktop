@@ -7,6 +7,7 @@ import type {
   OutdatedPackage,
   PatchBatchConfig,
   PatchBatchResult,
+  NonBreakingUpdateConfig,
   SecurityPatchConfig,
   SecurityPatchResult,
   RepoInfo,
@@ -19,13 +20,22 @@ import type {
   FullScanResult,
   DeadCodeReport,
   DeadCodeExport,
-  BridgeConsoleSettings
+  BridgeConsoleSettings,
+  ConflictWarning,
+  AppSettings,
+  GitHubCliStatus
 } from './index'
 
 declare global {
   interface Window {
     bridge: {
       selectDirectory: () => Promise<string | null>
+      selectCodeDirectory: () => Promise<string | null>
+      getDefaultCodeDirectory: () => Promise<string>
+      getCodeDirectory: () => Promise<string | null>
+      saveCodeDirectory: (directory: string) => Promise<boolean>
+      directoryExists: (directory: string) => Promise<boolean>
+      scanForRepos: (directory: string) => Promise<Repository[]>
       scanRepository: (path: string) => Promise<Repository>
       readDirectory: (path: string) => Promise<FileEntry[]>
       readFile: (path: string) => Promise<string>
@@ -43,6 +53,7 @@ declare global {
       cleanupDeadCode: (payload: { repoPath: string; deadFiles: string[]; unusedExports: DeadCodeExport[]; createPr?: boolean }) => Promise<any>
       getOutdatedPackages: (repoPath: string, language?: Language) => Promise<OutdatedPackage[]>
       runPatchBatch: (config: PatchBatchConfig) => Promise<PatchBatchResult>
+      runNonBreakingUpdate: (config: NonBreakingUpdateConfig) => Promise<PatchBatchResult>
       runSecurityPatch: (config: SecurityPatchConfig) => Promise<SecurityPatchResult>
       onPatchBatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
       onPatchBatchWarning: (callback: (warning: { message: string; output: string }) => void) => () => void
@@ -51,6 +62,8 @@ declare global {
       onSecurityPatchLog: (callback: (entry: { message: string }) => void) => () => void
       getRepoInfo: (repoPath: string) => Promise<RepoInfo>
       checkProtectedBranch: (repoPath: string) => Promise<boolean>
+      predictMergeConflicts: (repoPath: string) => Promise<ConflictWarning[]>
+      getGitHubCliStatus: (repoPath: string) => Promise<GitHubCliStatus>
       getScheduledJobs: () => Promise<ScheduledJob[]>
       addScheduledJob: (job: Omit<ScheduledJob, 'id' | 'createdAt' | 'lastRun' | 'nextRun'>) => Promise<ScheduledJob>
       updateScheduledJob: (jobId: string, updates: Partial<ScheduledJob>) => Promise<ScheduledJob | null>
@@ -69,6 +82,8 @@ declare global {
       getBridgeConsoleSettings: () => Promise<BridgeConsoleSettings>
       saveBridgeConsoleSettings: (settings: BridgeConsoleSettings) => Promise<BridgeConsoleSettings>
       testBridgeConsoleConnection: (settings: BridgeConsoleSettings) => Promise<{ ok: boolean; message?: string }>
+      getAppSettings: () => Promise<AppSettings>
+      saveAppSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
     }
   }
 }

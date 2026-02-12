@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
+import { useAppSettings } from '../../contexts/AppSettingsContext'
 import type { ScanResult, SecurityFinding, ScanProgress } from '../../types'
 
 const SEVERITY_COLORS = {
@@ -11,6 +12,7 @@ const SEVERITY_COLORS = {
 
 export default function Security() {
   const { selectedRepo } = useRepositories()
+  const { settings } = useAppSettings()
   const [scanning, setScanning] = useState(false)
   const [progress, setProgress] = useState<ScanProgress | null>(null)
   const [result, setResult] = useState<ScanResult | null>(null)
@@ -71,6 +73,18 @@ export default function Security() {
   const filteredFindings = result?.findings.filter(f =>
     filterSeverity === 'all' || f.severity === filterSeverity
   ) || []
+
+  if (!settings.experimentalFeatures) {
+    return (
+      <div className="empty-state fade-in">
+        <svg className="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+        <h3 className="empty-state-title">Experimental feature disabled</h3>
+        <p className="empty-state-desc">Enable Experimental Features in Settings to run Security Scan.</p>
+      </div>
+    )
+  }
 
   if (!selectedRepo) {
     return (

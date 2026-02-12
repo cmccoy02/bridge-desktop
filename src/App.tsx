@@ -9,12 +9,18 @@ import Security from './components/Security/Security'
 import FileBrowser from './components/FileBrowser/FileBrowser'
 import FullScan from './components/FullScan/FullScan'
 import Settings from './components/Settings/Settings'
+import { useAppSettings } from './contexts/AppSettingsContext'
 import type { View } from './types'
 
 export default function App() {
   const [currentView, setCurrentView] = useState<View>('dashboard')
+  const { settings } = useAppSettings()
 
   const content = useMemo(() => {
+    if (!settings.experimentalFeatures && (currentView === 'full-scan' || currentView === 'security')) {
+      return <Dashboard onNavigate={setCurrentView} />
+    }
+
     switch (currentView) {
       case 'dashboard':
         return <Dashboard onNavigate={setCurrentView} />
@@ -34,13 +40,17 @@ export default function App() {
       default:
         return <PatchBatch />
     }
-  }, [currentView])
+  }, [currentView, settings.experimentalFeatures])
+
+  const normalizedView: View = (!settings.experimentalFeatures && (currentView === 'full-scan' || currentView === 'security'))
+    ? 'dashboard'
+    : currentView
 
   return (
     <div className="app-layout">
-      <Sidebar currentView={currentView} onNavigate={setCurrentView} />
+      <Sidebar currentView={normalizedView} onNavigate={setCurrentView} />
       <main className="app-main">
-        <Header currentView={currentView} />
+        <Header currentView={normalizedView} />
         <div className="app-content">
           {content}
         </div>

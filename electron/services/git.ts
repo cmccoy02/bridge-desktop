@@ -13,6 +13,21 @@ export interface RepoInfo {
   behind: number
 }
 
+export interface ConflictWarning {
+  severity: 'high' | 'medium'
+  message: string
+  recommendation: string
+  conflictingFiles: string[]
+  behindBy: number
+}
+
+export interface GitHubCliStatus {
+  installed: boolean
+  authenticated: boolean
+  account?: string
+  message?: string
+}
+
 const PROTECTED_BRANCHES = ['main', 'master', 'develop', 'production', 'staging']
 
 async function runGitCommand(repoPath: string, command: string): Promise<string> {
@@ -160,11 +175,117 @@ export async function createPullRequest(
   title: string,
   body: string
 ): Promise<string> {
-  const result = await runGitCommand(
-    repoPath,
-    `gh pr create --title "${title.replace(/"/g, '\\"')}" --body "${body.replace(/"/g, '\\"')}"`
-  )
-  return result
+  try {
+    await runGitCommand(repoPath, 'command -v gh')
+  } catch {
+    throw new Error('GitHub CLI (`gh`) is required to create PRs. Install it and run `gh auth login`.')
+  }
+
+  try {
+    const result = await runGitCommand(
+      repoPath,
+      `gh pr create --title "${title.replace(/"/g, '\\"')}" --body "${body.replace(/"/g, '\\"')}"`
+    )
+    return result
+  } catch (error: any) {
+    const output = `${error?.stdout || ''}${error?.stderr || ''}`.trim()
+    if (output.includes('not logged in')) {
+      throw new Error('GitHub CLI is not authenticated. Run `gh auth login` and retry.')
+    }
+    throw new Error(output || 'Failed to create pull request with gh CLI.')
+  }
+}
+
+export async function predictMergeConflicts(
+  repoPath: string,
+  options: { baseBranch?: string; minBehindCommits?: number } = {}
+): Promise<ConflictWarning[]> {
+  const warnings: ConflictWarning[] = []
+
+  try {
+    const info = await getRepoInfo(repoPath)
+    const currentBranch = info.branch
+    const baseBranch = options.baseBranch || info.defaultBranch || 'main'
+    const minBehindCommits = options.minBehindCommits ?? 10
+
+    if (!currentBranch || currentBranch === 'HEAD' || currentBranch === baseBranch) {
+      return warnings
+    }
+
+    try {
+      await runGitCommand(repoPath, 'git fetch origin --prune')
+    } catch {
+      // Continue with local refs if fetch fails.
+    }
+
+    const behindRaw = await runGitCommand(
+      repoPath,
+      `git rev-list --count ${currentBranch}..origin/${baseBranch} 2>/dev/null || echo 0`
+    )
+    const behindBy = Number.parseInt(behindRaw, 10) || 0
+    if (behindBy < minBehindCommits) {
+      return warnings
+    }
+
+    const oursRaw = await runGitCommand(
+      repoPath,
+      `git diff --name-only origin/${baseBranch}...${currentBranch}`
+    )
+    const theirsRaw = await runGitCommand(
+      repoPath,
+      `git diff --name-only ${currentBranch}...origin/${baseBranch}`
+    )
+
+    const ours = new Set(oursRaw.split('\n').map(line => line.trim()).filter(Boolean))
+    const theirs = new Set(theirsRaw.split('\n').map(line => line.trim()).filter(Boolean))
+    const overlapping = Array.from(ours).filter(file => theirs.has(file))
+
+    if (overlapping.length === 0) {
+      return warnings
+    }
+
+    const severity: ConflictWarning['severity'] = behindBy >= 25 ? 'high' : 'medium'
+    warnings.push({
+      severity,
+      behindBy,
+      message: `Branch is ${behindBy} commits behind ${baseBranch}; ${overlapping.length} files overlap with ${baseBranch}.`,
+      recommendation: `Run \`git fetch origin && git rebase origin/${baseBranch}\` before opening a PR.`,
+      conflictingFiles: overlapping.slice(0, 30)
+    })
+
+    return warnings
+  } catch {
+    return warnings
+  }
+}
+
+export async function getGitHubCliStatus(repoPath: string): Promise<GitHubCliStatus> {
+  try {
+    await runGitCommand(repoPath, 'command -v gh')
+  } catch {
+    return {
+      installed: false,
+      authenticated: false,
+      message: 'GitHub CLI not installed. Install with `brew install gh`.'
+    }
+  }
+
+  try {
+    const output = await runGitCommand(repoPath, 'gh auth status -h github.com')
+    const accountMatch = output.match(/Logged in to github\.com account\s+([^\s]+)/i)
+    return {
+      installed: true,
+      authenticated: true,
+      account: accountMatch?.[1]
+    }
+  } catch (error: any) {
+    const stderr = `${error?.stderr || ''}${error?.stdout || ''}`.trim()
+    return {
+      installed: true,
+      authenticated: false,
+      message: stderr || 'GitHub CLI installed but not authenticated. Run `gh auth login`.'
+    }
+  }
 }
 
 function hasPositiveTestSignal(output: string): boolean {

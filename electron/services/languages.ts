@@ -21,6 +21,8 @@ export interface OutdatedPackage {
   latest: string
   type: 'dependencies' | 'devDependencies'
   hasPatchUpdate: boolean
+  isNonBreaking: boolean
+  updateType: 'patch' | 'minor' | 'major' | 'unknown'
   language: Language
 }
 
@@ -136,6 +138,8 @@ export async function getPythonOutdated(repoPath: string): Promise<OutdatedPacka
             latest,
             type: 'dependencies',
             hasPatchUpdate,
+            isNonBreaking: hasPatchUpdate,
+            updateType: hasPatchUpdate ? 'patch' : 'unknown',
             language: 'python'
           })
         }
@@ -185,6 +189,8 @@ export async function getRubyOutdated(repoPath: string): Promise<OutdatedPackage
             latest,
             type: 'dependencies',
             hasPatchUpdate,
+            isNonBreaking: hasPatchUpdate,
+            updateType: hasPatchUpdate ? 'patch' : 'unknown',
             language: 'ruby'
           })
         }
@@ -211,6 +217,8 @@ export async function getRubyOutdated(repoPath: string): Promise<OutdatedPackage
               latest,
               type: 'dependencies',
               hasPatchUpdate,
+              isNonBreaking: hasPatchUpdate,
+              updateType: hasPatchUpdate ? 'patch' : 'unknown',
               language: 'ruby'
             })
           }
@@ -260,6 +268,8 @@ export async function getElixirOutdated(repoPath: string): Promise<OutdatedPacka
             latest,
             type: 'dependencies',
             hasPatchUpdate,
+            isNonBreaking: hasPatchUpdate,
+            updateType: hasPatchUpdate ? 'patch' : 'unknown',
             language: 'elixir'
           })
         }

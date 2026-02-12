@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
+import { useAppSettings } from '../../contexts/AppSettingsContext'
 import type { View, Language, RepoInfo } from '../../types'
 
 interface SidebarProps {
@@ -16,7 +17,17 @@ const LANGUAGE_COLORS: Record<Language, string> = {
 }
 
 export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
-  const { repositories, selectedRepo, selectRepository, addRepository, removeRepository } = useRepositories()
+  const {
+    repositories,
+    selectedRepo,
+    codeDirectory,
+    selectRepository,
+    addRepository,
+    removeRepository,
+    selectAndScanCodeDirectory,
+    scanCodeDirectory
+  } = useRepositories()
+  const { settings } = useAppSettings()
   const [repoInfoMap, setRepoInfoMap] = useState<Record<string, RepoInfo>>({})
 
   useEffect(() => {
@@ -37,10 +48,14 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
     fetchRepoInfo()
   }, [repositories])
 
-  const handleImport = async () => {
-    const path = await window.bridge.selectDirectory()
-    if (path) {
-      await addRepository(path)
+  const handleSelectCodeDirectory = async () => {
+    await selectAndScanCodeDirectory()
+  }
+
+  const handleImportSingleRepo = async () => {
+    const repoPath = await window.bridge.selectDirectory()
+    if (repoPath) {
+      await addRepository(repoPath)
     }
   }
 
@@ -65,16 +80,18 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
             </svg>
             Dashboard
           </button>
-          <button
-            className={`nav-item ${currentView === 'full-scan' ? 'active' : ''}`}
-            onClick={() => onNavigate('full-scan')}
-          >
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <path d="M12 6v6l4 2" />
-            </svg>
-            Full TD Scan
-          </button>
+          {settings.experimentalFeatures && (
+            <button
+              className={`nav-item ${currentView === 'full-scan' ? 'active' : ''}`}
+              onClick={() => onNavigate('full-scan')}
+            >
+              <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 6v6l4 2" />
+              </svg>
+              Full TD Scan
+            </button>
+          )}
           <button
             className={`nav-item ${currentView === 'patch-batch' ? 'active' : ''}`}
             onClick={() => onNavigate('patch-batch')}
@@ -94,15 +111,17 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
             </svg>
             Cleanup
           </button>
-          <button
-            className={`nav-item ${currentView === 'security' ? 'active' : ''}`}
-            onClick={() => onNavigate('security')}
-          >
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
-            Security Scan
-          </button>
+          {settings.experimentalFeatures && (
+            <button
+              className={`nav-item ${currentView === 'security' ? 'active' : ''}`}
+              onClick={() => onNavigate('security')}
+            >
+              <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+              Security Scan
+            </button>
+          )}
           <button
             className={`nav-item ${currentView === 'scheduler' ? 'active' : ''}`}
             onClick={() => onNavigate('scheduler')}
@@ -136,13 +155,30 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
 
         <div className="nav-section">
           <div className="nav-section-title">Repositories</div>
-          <button className="nav-item" onClick={handleImport}>
+          <button className="nav-item" onClick={handleSelectCodeDirectory}>
             <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
-            Import Repository
+            {codeDirectory ? 'Change Code Directory' : 'Select Code Directory'}
           </button>
+          <button className="nav-item" onClick={handleImportSingleRepo}>
+            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M20 21V8a2 2 0 0 0-2-2h-4l-2-3H6a2 2 0 0 0-2 2v16" />
+              <line x1="12" y1="11" x2="12" y2="17" />
+              <line x1="9" y1="14" x2="15" y2="14" />
+            </svg>
+            Import Single Repo
+          </button>
+          {codeDirectory && (
+            <button className="nav-item" onClick={() => scanCodeDirectory()}>
+              <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M23 4v6h-6M1 20v-6h6" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+              Refresh Repos
+            </button>
+          )}
 
           <div className="repo-list">
             {repositories.map(repo => {

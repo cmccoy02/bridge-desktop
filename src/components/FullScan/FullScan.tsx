@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
 import { useScanContext, type ScanTab } from '../../contexts/ScanContext'
+import { useAppSettings } from '../../contexts/AppSettingsContext'
 import type { CircularDependency, DeadCodeExport, FullScanResult } from '../../types'
 import CircularDepsGraph from './CircularDepsGraph'
 
@@ -36,6 +37,7 @@ const buildCircularSuggestion = (dep: CircularDependency) => {
 
 export default function FullScan() {
   const { selectedRepo } = useRepositories()
+  const { settings } = useAppSettings()
   const {
     scanResults,
     updateScanResult,
@@ -174,6 +176,18 @@ export default function FullScan() {
     if (!result) return []
     return result.deadCode.unusedExports.filter(exp => !removedExports.has(`${exp.file}:${exp.exportName}`))
   }, [result, removedExports])
+
+  if (!settings.experimentalFeatures) {
+    return (
+      <div className="empty-state fade-in">
+        <svg className="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M12 3v18M3 12h18" />
+        </svg>
+        <h3 className="empty-state-title">Experimental feature disabled</h3>
+        <p className="empty-state-desc">Enable Experimental Features in Settings to run Full TD Scan.</p>
+      </div>
+    )
+  }
 
   if (!selectedRepo) {
     return (

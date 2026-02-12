@@ -19,6 +19,8 @@ export interface OutdatedPackage {
   latest: string
   type: 'dependencies' | 'devDependencies'
   hasPatchUpdate: boolean
+  isNonBreaking: boolean
+  updateType: 'patch' | 'minor' | 'major' | 'unknown'
   language: Language
 }
 
@@ -40,12 +42,41 @@ export interface RepoInfo {
   behind: number
 }
 
+export interface ConflictWarning {
+  severity: 'high' | 'medium'
+  message: string
+  recommendation: string
+  conflictingFiles: string[]
+  behindBy: number
+}
+
+export interface GitHubCliStatus {
+  installed: boolean
+  authenticated: boolean
+  account?: string
+  message?: string
+}
+
 export interface PatchBatchConfig {
   repoPath: string
   branchName: string
   packages: { name: string; language: Language }[]
   createPR: boolean
   runTests: boolean
+  updateStrategy?: 'wanted' | 'latest'
+  testCommand?: string
+  testTimeoutMs?: number
+  prTitle?: string
+  prBody?: string
+}
+
+export interface NonBreakingUpdateConfig {
+  repoPath: string
+  branchName: string
+  createPR: boolean
+  runTests: boolean
+  testCommand?: string
+  testTimeoutMs?: number
   prTitle?: string
   prBody?: string
 }
@@ -276,10 +307,33 @@ export interface BridgeConsoleSettings {
   autoUpload: boolean
 }
 
+export interface AppSettings {
+  experimentalFeatures: boolean
+  onboardingCompleted: boolean
+}
+
 contextBridge.exposeInMainWorld('bridge', {
   // Repository management
   selectDirectory: (): Promise<string | null> =>
     ipcRenderer.invoke('select-directory'),
+
+  selectCodeDirectory: (): Promise<string | null> =>
+    ipcRenderer.invoke('select-code-directory'),
+
+  getDefaultCodeDirectory: (): Promise<string> =>
+    ipcRenderer.invoke('get-default-code-directory'),
+
+  getCodeDirectory: (): Promise<string | null> =>
+    ipcRenderer.invoke('get-code-directory'),
+
+  saveCodeDirectory: (directory: string): Promise<boolean> =>
+    ipcRenderer.invoke('save-code-directory', directory),
+
+  directoryExists: (directory: string): Promise<boolean> =>
+    ipcRenderer.invoke('directory-exists', directory),
+
+  scanForRepos: (directory: string): Promise<Repository[]> =>
+    ipcRenderer.invoke('scan-for-repos', directory),
 
   scanRepository: (path: string): Promise<Repository> =>
     ipcRenderer.invoke('scan-repository', path),
@@ -337,6 +391,9 @@ contextBridge.exposeInMainWorld('bridge', {
   runPatchBatch: (config: PatchBatchConfig): Promise<PatchBatchResult> =>
     ipcRenderer.invoke('run-patch-batch', config),
 
+  runNonBreakingUpdate: (config: NonBreakingUpdateConfig): Promise<PatchBatchResult> =>
+    ipcRenderer.invoke('run-non-breaking-update', config),
+
   runSecurityPatch: (config: SecurityPatchConfig): Promise<SecurityPatchResult> =>
     ipcRenderer.invoke('run-security-patch', config),
 
@@ -371,6 +428,12 @@ contextBridge.exposeInMainWorld('bridge', {
 
   checkProtectedBranch: (repoPath: string): Promise<boolean> =>
     ipcRenderer.invoke('check-protected-branch', repoPath),
+
+  predictMergeConflicts: (repoPath: string): Promise<ConflictWarning[]> =>
+    ipcRenderer.invoke('predict-merge-conflicts', repoPath),
+
+  getGitHubCliStatus: (repoPath: string): Promise<GitHubCliStatus> =>
+    ipcRenderer.invoke('get-github-cli-status', repoPath),
 
   // Scheduler
   getScheduledJobs: (): Promise<ScheduledJob[]> =>
@@ -433,13 +496,25 @@ contextBridge.exposeInMainWorld('bridge', {
     ipcRenderer.invoke('save-bridge-console-settings', settings),
 
   testBridgeConsoleConnection: (settings: BridgeConsoleSettings): Promise<{ ok: boolean; message?: string }> =>
-    ipcRenderer.invoke('test-bridge-console-connection', settings)
+    ipcRenderer.invoke('test-bridge-console-connection', settings),
+
+  getAppSettings: (): Promise<AppSettings> =>
+    ipcRenderer.invoke('get-app-settings'),
+
+  saveAppSettings: (settings: Partial<AppSettings>): Promise<AppSettings> =>
+    ipcRenderer.invoke('save-app-settings', settings)
 })
 
 declare global {
   interface Window {
     bridge: {
       selectDirectory: () => Promise<string | null>
+      selectCodeDirectory: () => Promise<string | null>
+      getDefaultCodeDirectory: () => Promise<string>
+      getCodeDirectory: () => Promise<string | null>
+      saveCodeDirectory: (directory: string) => Promise<boolean>
+      directoryExists: (directory: string) => Promise<boolean>
+      scanForRepos: (directory: string) => Promise<Repository[]>
       scanRepository: (path: string) => Promise<Repository>
       readDirectory: (path: string) => Promise<FileEntry[]>
       readFile: (path: string) => Promise<string>
@@ -457,13 +532,17 @@ declare global {
       cleanupDeadCode: (payload: { repoPath: string; deadFiles: string[]; unusedExports: DeadCodeExport[]; createPr?: boolean }) => Promise<any>
       getOutdatedPackages: (repoPath: string, language?: Language) => Promise<OutdatedPackage[]>
       runPatchBatch: (config: PatchBatchConfig) => Promise<PatchBatchResult>
+      runNonBreakingUpdate: (config: NonBreakingUpdateConfig) => Promise<PatchBatchResult>
       runSecurityPatch: (config: SecurityPatchConfig) => Promise<SecurityPatchResult>
       onPatchBatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
       onPatchBatchWarning: (callback: (warning: { message: string; output: string }) => void) => () => void
+      onPatchBatchLog: (callback: (entry: { message: string }) => void) => () => void
       onSecurityPatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
       onSecurityPatchLog: (callback: (entry: { message: string }) => void) => () => void
       getRepoInfo: (repoPath: string) => Promise<RepoInfo>
       checkProtectedBranch: (repoPath: string) => Promise<boolean>
+      predictMergeConflicts: (repoPath: string) => Promise<ConflictWarning[]>
+      getGitHubCliStatus: (repoPath: string) => Promise<GitHubCliStatus>
       getScheduledJobs: () => Promise<ScheduledJob[]>
       addScheduledJob: (job: Omit<ScheduledJob, 'id' | 'createdAt' | 'lastRun' | 'nextRun'>) => Promise<ScheduledJob>
       updateScheduledJob: (jobId: string, updates: Partial<ScheduledJob>) => Promise<ScheduledJob | null>
@@ -482,6 +561,8 @@ declare global {
       getBridgeConsoleSettings: () => Promise<BridgeConsoleSettings>
       saveBridgeConsoleSettings: (settings: BridgeConsoleSettings) => Promise<BridgeConsoleSettings>
       testBridgeConsoleConnection: (settings: BridgeConsoleSettings) => Promise<{ ok: boolean; message?: string }>
+      getAppSettings: () => Promise<AppSettings>
+      saveAppSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>
     }
   }
 }

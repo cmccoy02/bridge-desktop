@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
+import { useAppSettings } from '../../contexts/AppSettingsContext'
 import type { ScheduledJob, ScheduleFrequency, JobResult, SmartScanSchedule } from '../../types'
 
 const FREQUENCY_LABELS: Record<ScheduleFrequency, string> = {
@@ -11,6 +12,7 @@ const FREQUENCY_LABELS: Record<ScheduleFrequency, string> = {
 
 export default function Scheduler() {
   const { repositories } = useRepositories()
+  const { settings } = useAppSettings()
   const [jobs, setJobs] = useState<ScheduledJob[]>([])
   const [results, setResults] = useState<JobResult[]>([])
   const [smartSchedules, setSmartSchedules] = useState<SmartScanSchedule[]>([])
@@ -21,7 +23,7 @@ export default function Scheduler() {
   // New job form state
   const [selectedRepo, setSelectedRepo] = useState('')
   const [frequency, setFrequency] = useState<ScheduleFrequency>('weekly')
-  const [createPR, setCreatePR] = useState(true)
+  const [createPR, setCreatePR] = useState(false)
   const [runTests, setRunTests] = useState(true)
   const [smartRepo, setSmartRepo] = useState('')
 
@@ -166,62 +168,64 @@ export default function Scheduler() {
         </div>
       </div>
 
-      <div className="card" style={{ marginBottom: '24px' }}>
-        <div className="card-header">
-          <h3 className="card-title">Smart TD Scans</h3>
-        </div>
-        <div style={{ padding: '0 16px 16px' }}>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '12px' }}>
-            Bridge will analyze commit patterns and schedule scans during low-activity hours.
-          </p>
-
-          {smartMessage && <div className="alert success" style={{ marginBottom: '12px' }}>{smartMessage}</div>}
-
-          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
-            <select
-              className="input"
-              value={smartRepo}
-              onChange={e => setSmartRepo(e.target.value)}
-              style={{ minWidth: '220px' }}
-            >
-              <option value="">Select repository...</option>
-              {repositories.filter(r => r.exists && r.hasGit).map(repo => (
-                <option key={repo.path} value={repo.path}>
-                  {repo.name}
-                </option>
-              ))}
-            </select>
-            <button className="btn btn-primary btn-sm" onClick={addSmartSchedule} disabled={!smartRepo}>
-              Enable Smart Scan
-            </button>
+      {settings.experimentalFeatures && (
+        <div className="card" style={{ marginBottom: '24px' }}>
+          <div className="card-header">
+            <h3 className="card-title">Smart TD Scans</h3>
           </div>
+          <div style={{ padding: '0 16px 16px' }}>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '12px' }}>
+              Bridge will analyze commit patterns and schedule scans during low-activity hours.
+            </p>
 
-          {smartSchedules.length === 0 ? (
-            <div style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>No smart scans configured.</div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {smartSchedules.map(schedule => (
-                <div key={schedule.id} className="list-item">
-                  <div>
-                    <div className="list-title">{schedule.repoName}</div>
-                    <div className="list-sub">Quiet hour: {schedule.quietHour}:00 · Next run: {formatDate(schedule.nextRun)}</div>
-                  </div>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    <button className="btn btn-secondary btn-sm" onClick={() => toggleSmartSchedule(schedule.id, !schedule.enabled)}>
-                      {schedule.enabled ? 'Pause' : 'Resume'}
-                    </button>
-                    <button className="btn btn-ghost btn-icon" onClick={() => deleteSmartSchedule(schedule.id)}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              ))}
+            {smartMessage && <div className="alert success" style={{ marginBottom: '12px' }}>{smartMessage}</div>}
+
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+              <select
+                className="input"
+                value={smartRepo}
+                onChange={e => setSmartRepo(e.target.value)}
+                style={{ minWidth: '220px' }}
+              >
+                <option value="">Select repository...</option>
+                {repositories.filter(r => r.exists && r.hasGit).map(repo => (
+                  <option key={repo.path} value={repo.path}>
+                    {repo.name}
+                  </option>
+                ))}
+              </select>
+              <button className="btn btn-primary btn-sm" onClick={addSmartSchedule} disabled={!smartRepo}>
+                Enable Smart Scan
+              </button>
             </div>
-          )}
+
+            {smartSchedules.length === 0 ? (
+              <div style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>No smart scans configured.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {smartSchedules.map(schedule => (
+                  <div key={schedule.id} className="list-item">
+                    <div>
+                      <div className="list-title">{schedule.repoName}</div>
+                      <div className="list-sub">Quiet hour: {schedule.quietHour}:00 · Next run: {formatDate(schedule.nextRun)}</div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button className="btn btn-secondary btn-sm" onClick={() => toggleSmartSchedule(schedule.id, !schedule.enabled)}>
+                        {schedule.enabled ? 'Pause' : 'Resume'}
+                      </button>
+                      <button className="btn btn-ghost btn-icon" onClick={() => deleteSmartSchedule(schedule.id)}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {loading ? (
         <div style={{ display: 'flex', justifyContent: 'center', padding: '60px' }}>

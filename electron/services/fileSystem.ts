@@ -1,5 +1,7 @@
 import fs from 'fs/promises'
+import fsSync from 'fs'
 import path from 'path'
+import os from 'os'
 import { detectLanguages, Language } from './languages'
 
 export interface Repository {
@@ -17,6 +19,26 @@ export interface FileEntry {
   isDirectory: boolean
   size?: number
   modified?: string
+}
+
+const SKIP_DIRECTORY_NAMES = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'build',
+  'coverage',
+  '.turbo',
+  '.next',
+  '.nuxt'
+])
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.access(targetPath)
+    return true
+  } catch {
+    return false
+  }
 }
 
 export async function scanRepository(repoPath: string): Promise<Repository> {
@@ -45,6 +67,83 @@ export async function scanRepository(repoPath: string): Promise<Repository> {
     hasGit,
     addedAt: new Date().toISOString(),
     exists
+  }
+}
+
+export async function scanForRepos(directory: string, maxDepth = 2): Promise<Repository[]> {
+  const discovered = new Set<string>()
+
+  async function walk(currentPath: string, depth: number): Promise<void> {
+    if (depth > maxDepth) {
+      return
+    }
+
+    const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => [])
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue
+      }
+
+      if (entry.name.startsWith('.') && entry.name !== '.git') {
+        continue
+      }
+
+      if (SKIP_DIRECTORY_NAMES.has(entry.name)) {
+        continue
+      }
+
+      const fullPath = path.join(currentPath, entry.name)
+      const gitPath = path.join(fullPath, '.git')
+
+      if (await pathExists(gitPath)) {
+        discovered.add(fullPath)
+        continue
+      }
+
+      await walk(fullPath, depth + 1)
+    }
+  }
+
+  await walk(directory, 0)
+
+  const repos = await Promise.all(
+    Array.from(discovered).map(repoPath => scanRepository(repoPath))
+  )
+
+  return repos.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+export function getDefaultCodeDirectory(): string {
+  const homeDir = os.homedir()
+  const commonPaths = [
+    path.join(homeDir, 'code'),
+    path.join(homeDir, 'projects'),
+    path.join(homeDir, 'dev'),
+    path.join(homeDir, 'workspace'),
+    path.join(homeDir, 'Documents', 'code')
+  ]
+
+  for (const candidate of commonPaths) {
+    try {
+      const stats = fsSync.statSync(candidate)
+      if (stats.isDirectory()) {
+        return candidate
+      }
+    } catch {
+      // Continue
+    }
+  }
+
+  return path.join(homeDir, 'code')
+}
+
+export async function directoryExists(dirPath: string): Promise<boolean> {
+  try {
+    const stats = await fs.stat(dirPath)
+    return stats.isDirectory()
+  } catch {
+    return false
   }
 }
 

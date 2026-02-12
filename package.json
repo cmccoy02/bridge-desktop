@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc && vite build && electron-builder",
+    "build:unsigned": "tsc && vite build && electron-builder --config.mac.identity=null",
+    "build:mac": "electron-builder --mac dmg",
     "preview": "vite preview",
     "electron:dev": "vite --host 127.0.0.1 --port 5173"
   },
@@ -29,6 +31,7 @@
     "@types/react-dom": "^18.2.17",
     "@types/semver": "^7.5.6",
     "@vitejs/plugin-react": "^4.2.1",
+    "@electron/notarize": "^2.2.1",
     "electron": "^28.1.0",
     "electron-builder": "^24.9.1",
     "typescript": "^5.3.3",
@@ -39,9 +42,14 @@
   "build": {
     "appId": "com.bridge.desktop",
     "productName": "Bridge",
+    "afterSign": "scripts/notarize.cjs",
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": "dmg"
+      "target": "dmg",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist"
     }
   }
 }

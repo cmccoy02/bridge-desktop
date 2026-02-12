@@ -169,6 +169,19 @@ function buildToolEnv(): NodeJS.ProcessEnv {
   }
 }
 
+async function resolveCommandEnv(cwd: string): Promise<NodeJS.ProcessEnv> {
+  const env = buildToolEnv()
+  const localNpmrc = path.join(cwd, '.npmrc')
+  try {
+    await fs.access(localNpmrc)
+    env.NPM_CONFIG_USERCONFIG = localNpmrc
+    env.npm_config_userconfig = localNpmrc
+  } catch {
+    // Keep defaults when repository does not define .npmrc.
+  }
+  return env
+}
+
 async function detectPackageManager(repoPath: string): Promise<'npm' | 'yarn' | 'pnpm'> {
   try {
     await fs.access(path.join(repoPath, 'pnpm-lock.yaml'))
@@ -207,11 +220,12 @@ function extractJsonPayload(output: string): any | null {
 async function runCli(command: string, args: string[], cwd: string, timeoutMs = DEFAULT_SCAN_TIMEOUT_MS) {
   const cmd = `${command} ${args.join(' ')}`.trim()
   try {
+    const env = await resolveCommandEnv(cwd)
     const { stdout, stderr } = await execAsync(cmd, {
       cwd,
       timeout: timeoutMs,
       maxBuffer: 20 * 1024 * 1024,
-      env: buildToolEnv()
+      env
     })
     return { stdout: stdout || '', stderr: stderr || '', success: true }
   } catch (error: any) {
@@ -532,23 +546,42 @@ export async function analyzeDependencies(repoPath: string): Promise<DependencyR
 }
 
 export async function detectCircularDependencies(repoPath: string): Promise<CircularDependencyReport> {
+  const tempConfigPath = path.join(repoPath, '.bridge-depcruise.tmp.json')
   try {
-    const { cruise } = await import('dependency-cruiser')
-    const result = cruise([repoPath], {
-      ruleSet: {
-        forbidden: [
-          {
-            name: 'no-circular',
-            severity: 'error',
-            from: {},
-            to: { circular: true }
-          }
-        ]
-      },
-      doNotFollow: { path: 'node_modules' }
-    })
+    const tempConfig = {
+      forbidden: [
+        {
+          name: 'no-circular',
+          severity: 'error',
+          from: {},
+          to: { circular: true }
+        }
+      ]
+    }
+    await fs.writeFile(tempConfigPath, JSON.stringify(tempConfig), 'utf-8')
 
-    const violations = result.output?.violations || []
+    const result = await runCli(
+      'depcruise',
+      [
+        '--config', tempConfigPath,
+        '--include-only', '^src',
+        '--exclude', 'node_modules',
+        '--output-type', 'json',
+        '.'
+      ],
+      repoPath,
+      DEFAULT_SCAN_TIMEOUT_MS
+    )
+    const payload = extractJsonPayload(result.stdout || result.stderr)
+    if (!payload) {
+      return {
+        count: 0,
+        dependencies: [],
+        error: 'dependency-cruiser did not produce parseable output.'
+      }
+    }
+
+    const violations = payload.output?.violations || []
     const dependencies: CircularDependency[] = violations.map((violation: any) => ({
       from: violation.from,
       to: violation.to,
@@ -562,6 +595,8 @@ export async function detectCircularDependencies(repoPath: string): Promise<Circ
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Circular dependency scan failed'
     return { count: 0, dependencies: [], error: message }
+  } finally {
+    await fs.unlink(tempConfigPath).catch(() => {})
   }
 }
 

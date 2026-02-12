@@ -1,7 +1,16 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import path from 'path'
 import Store from 'electron-store'
-import { scanRepository, readDirectory, readFile, validateRepositories, cleanupMissingRepositories } from './services/fileSystem'
+import {
+  scanRepository,
+  scanForRepos,
+  readDirectory,
+  readFile,
+  validateRepositories,
+  cleanupMissingRepositories,
+  getDefaultCodeDirectory,
+  directoryExists
+} from './services/fileSystem'
 import {
   getFileSizeStats,
   generateCleanupReport,
@@ -22,7 +31,12 @@ import {
   getElixirOutdated,
   Language
 } from './services/languages'
-import { getJsOutdatedPackages, runPatchBatchPipeline, runSecurityPatchPipeline } from './services/patchBatch'
+import {
+  getJsOutdatedPackages,
+  runPatchBatchPipeline,
+  runNonBreakingUpdatePipeline,
+  runSecurityPatchPipeline
+} from './services/patchBatch'
 import {
   getScheduledJobs,
   addScheduledJob,
@@ -47,14 +61,22 @@ import {
 } from './services/smartScheduler'
 import {
   getRepoInfo,
-  isOnProtectedBranch
+  isOnProtectedBranch,
+  predictMergeConflicts,
+  getGitHubCliStatus
 } from './services/git'
 import {
   runSecurityScan,
   generateSecurityFix,
   checkAgenticFixerAvailable
 } from './services/securityScanner'
+import {
+  getAppSettings,
+  saveAppSettings,
+  isExperimentalFeaturesEnabled
+} from './services/appSettings'
 const store = new Store()
+const CODE_DIRECTORY_KEY = 'bridge-code-directory'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -104,9 +126,9 @@ app.whenReady().then(() => {
   setSchedulerExecutor(async (job): Promise<JobResult | null> => {
     try {
       const outdated = await collectOutdatedPackages(job.repoPath)
-      const patchPackages = outdated.filter(p => p.hasPatchUpdate)
+      const nonBreakingPackages = outdated.filter(p => p.isNonBreaking)
 
-      if (patchPackages.length === 0) {
+      if (nonBreakingPackages.length === 0) {
         return {
           jobId: job.id,
           success: true,
@@ -115,15 +137,13 @@ app.whenReady().then(() => {
         }
       }
 
-      const packages = patchPackages.map(p => ({ name: p.name, language: p.language }))
-      const result = await runPatchBatchPipeline({
+      const result = await runNonBreakingUpdatePipeline({
         repoPath: job.repoPath,
         branchName: `bridge-scheduled-${Date.now()}`,
-        packages,
         createPR: job.createPR,
         runTests: job.runTests,
-        prTitle: `chore(deps): scheduled update of ${packages.length} packages`,
-        prBody: `## Summary\nScheduled patch updates via Bridge.\n\n### Updated packages\n${packages.map(p => `- ${p.name} (${p.language})`).join('\n')}`
+        prTitle: `chore(deps): scheduled non-breaking dependency update`,
+        prBody: `## Summary\nScheduled non-breaking updates (patch + minor) via Bridge.`
       })
 
       return {
@@ -147,6 +167,9 @@ app.whenReady().then(() => {
   })
 
   setSmartScanExecutor(async (repoPath: string) => {
+    if (!isExperimentalFeaturesEnabled()) {
+      return
+    }
     await runFullScan(repoPath, { skipConsoleUpload: false })
   })
 
@@ -191,6 +214,60 @@ ipcMain.handle('select-directory', async () => {
   }
 
   return result.filePaths[0]
+})
+
+ipcMain.handle('get-default-code-directory', () => {
+  return getDefaultCodeDirectory()
+})
+
+ipcMain.handle('get-code-directory', () => {
+  return (store.get(CODE_DIRECTORY_KEY, '') as string) || null
+})
+
+ipcMain.handle('save-code-directory', (_, directory: string) => {
+  store.set(CODE_DIRECTORY_KEY, directory)
+  return true
+})
+
+ipcMain.handle('directory-exists', async (_, dirPath: string) => {
+  return await directoryExists(dirPath)
+})
+
+ipcMain.handle('select-code-directory', async () => {
+  const fallbackPath = (store.get(CODE_DIRECTORY_KEY, '') as string) || getDefaultCodeDirectory()
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    properties: ['openDirectory'],
+    title: 'Select code directory',
+    defaultPath: fallbackPath
+  })
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null
+  }
+
+  const selected = result.filePaths[0]
+  store.set(CODE_DIRECTORY_KEY, selected)
+  return selected
+})
+
+ipcMain.handle('scan-for-repos', async (_, directory: string) => {
+  const repos = await scanForRepos(directory)
+  const existing = (store.get('repositories', []) as any[]).filter(Boolean)
+  const byPath = new Map<string, any>()
+
+  for (const repo of existing) {
+    if (repo?.path) {
+      byPath.set(repo.path, repo)
+    }
+  }
+
+  for (const repo of repos) {
+    byPath.set(repo.path, repo)
+  }
+
+  const merged = await validateRepositories(Array.from(byPath.values()))
+  store.set('repositories', merged)
+  return merged
 })
 
 ipcMain.handle('scan-repository', async (_, repoPath: string) => {
@@ -247,6 +324,14 @@ ipcMain.handle('test-bridge-console-connection', async (_, settings: any) => {
   return await testBridgeConsoleConnection(settings)
 })
 
+ipcMain.handle('get-app-settings', () => {
+  return getAppSettings()
+})
+
+ipcMain.handle('save-app-settings', (_, settings: any) => {
+  return saveAppSettings(settings)
+})
+
 // Analysis
 ipcMain.handle('get-file-stats', async (_, repoPath: string) => {
   return await getFileSizeStats(repoPath)
@@ -261,6 +346,9 @@ ipcMain.handle('detect-dead-code', async (_, repoPath: string) => {
 })
 
 ipcMain.handle('run-full-scan', async (event, repoPath: string) => {
+  if (!isExperimentalFeaturesEnabled()) {
+    throw new Error('Full TD Scan is disabled. Enable Experimental Features in Settings.')
+  }
   return await runFullScan(repoPath, {
     onProgress: (message, step, total) => {
       event.sender.send('full-scan-progress', { message, step, total })
@@ -336,12 +424,24 @@ ipcMain.handle('run-patch-batch', async (event, config: {
   packages: { name: string; language: Language }[]
   createPR: boolean
   runTests: boolean
+  updateStrategy?: 'wanted' | 'latest'
   testCommand?: string
   testTimeoutMs?: number
   prTitle?: string
   prBody?: string
 }) => {
-  const { repoPath, branchName, packages, createPR, runTests: shouldRunTests, prTitle, prBody, testCommand, testTimeoutMs } = config
+  const {
+    repoPath,
+    branchName,
+    packages,
+    createPR,
+    runTests: shouldRunTests,
+    updateStrategy,
+    prTitle,
+    prBody,
+    testCommand,
+    testTimeoutMs
+  } = config
 
   return runPatchBatchPipeline(
     {
@@ -350,11 +450,32 @@ ipcMain.handle('run-patch-batch', async (event, config: {
       packages,
       createPR,
       runTests: shouldRunTests,
+      updateStrategy,
       prTitle,
       prBody,
       testCommand,
       testTimeoutMs
     },
+    {
+      onProgress: (message, step, total) => event.sender.send('patch-batch-progress', { message, step, total }),
+      onLog: (message) => event.sender.send('patch-batch-log', { message }),
+      onWarning: (warning) => event.sender.send('patch-batch-warning', warning)
+    }
+  )
+})
+
+ipcMain.handle('run-non-breaking-update', async (event, config: {
+  repoPath: string
+  branchName: string
+  createPR: boolean
+  runTests: boolean
+  testCommand?: string
+  testTimeoutMs?: number
+  prTitle?: string
+  prBody?: string
+}) => {
+  return runNonBreakingUpdatePipeline(
+    config,
     {
       onProgress: (message, step, total) => event.sender.send('patch-batch-progress', { message, step, total }),
       onLog: (message) => event.sender.send('patch-batch-log', { message }),
@@ -389,6 +510,14 @@ ipcMain.handle('check-protected-branch', async (_, repoPath: string) => {
   return await isOnProtectedBranch(repoPath)
 })
 
+ipcMain.handle('predict-merge-conflicts', async (_, repoPath: string) => {
+  return await predictMergeConflicts(repoPath)
+})
+
+ipcMain.handle('get-github-cli-status', async (_, repoPath: string) => {
+  return await getGitHubCliStatus(repoPath)
+})
+
 // Scheduler
 ipcMain.handle('get-scheduled-jobs', () => {
   return getScheduledJobs()
@@ -416,6 +545,9 @@ ipcMain.handle('get-smart-scan-schedules', () => {
 })
 
 ipcMain.handle('add-smart-scan-schedule', async (_, payload: { repoPath: string; repoName: string }) => {
+  if (!isExperimentalFeaturesEnabled()) {
+    throw new Error('Smart TD Scans are disabled. Enable Experimental Features in Settings.')
+  }
   return await addSmartScanSchedule(payload.repoPath, payload.repoName)
 })
 
@@ -438,11 +570,17 @@ ipcMain.handle('check-security-scanner-available', async () => {
 })
 
 ipcMain.handle('run-security-scan', async (event, repoPath: string) => {
+  if (!isExperimentalFeaturesEnabled()) {
+    throw new Error('Security Scan is disabled. Enable Experimental Features in Settings.')
+  }
   return await runSecurityScan(repoPath, (progress) => {
     event.sender.send('security-scan-progress', progress)
   })
 })
 
 ipcMain.handle('generate-security-fix', async (_, finding: any) => {
+  if (!isExperimentalFeaturesEnabled()) {
+    throw new Error('Security Scan is disabled. Enable Experimental Features in Settings.')
+  }
   return await generateSecurityFix(finding)
 })

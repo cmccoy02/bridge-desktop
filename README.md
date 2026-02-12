@@ -1,43 +1,79 @@
-# Bridge
+# Bridge-Desktop
 
-Dependency updates you can actually trust. Bridge validates patch updates locally before creating PRs.
+Local-first technical debt automation for engineers.
 
-## Quick Start (macOS)
+Bridge runs directly against repositories that already exist on your machine. It avoids GitHub API onboarding and uses your existing local git + optional `gh` authentication.
 
-1. Download `Bridge-0.1.0-arm64.dmg` from [releases/](./releases/)
-2. Open the DMG and drag Bridge to Applications
-3. Right-click Bridge > Open (first time only, to bypass Gatekeeper)
-4. Import a repository and start updating
+## 5-Minute Onboarding
 
-## What It Does
+1. Install and open Bridge.
+2. Select your code directory (for example `~/code`).
+3. Pick a repository.
+4. Run **Update Dependencies**:
+   - **Non-Breaking Updates**: one click for patch + minor updates.
+   - **Major Updates**: manual per-package selection.
+5. Optional: turn on PR creation (off by default) if `gh` is installed and authenticated.
 
-- **Patch Batch**: Select patch updates, Bridge runs your tests locally, then creates a PR only if everything passes
-- **Security Scanner**: Scan for vulnerabilities with one click
-- **Scheduler**: Automate patch updates on a schedule
-- **Cleanup**: Find large files and oversized components
+The Dashboard includes a first-run checklist and preflight checks.
 
-## Why Bridge?
+## Current Capabilities
 
-Dependabot says "100% compatible" but breaks things. Bridge runs actual lint/build/tests locally before pushing anything.
+- Local repository discovery (no GitHub API required).
+- One-click non-breaking dependency update workflow using:
+  - `rm -rf node_modules package-lock.json; npm install; npm update; rm -rf node_modules package-lock.json; npm install;`
+- Major-version package updates with explicit selection.
+- Isolated update workspaces via `git worktree` so local unstaged changes stay untouched.
+- Optional test and lint verification before commit/PR.
+- Optional PR creation through GitHub CLI (`gh`).
+- Merge conflict risk prediction based on branch divergence.
+- Scheduled dependency updates.
+- Optional Bridge-Console metrics upload.
 
-## Supported Languages
+## Experimental Features
 
-- JavaScript (npm)
-- Python (pip)
-- Ruby (bundler)
-- Elixir (mix)
+Default: **disabled**.
+
+When enabled in Settings:
+- Full TD Scan
+- Security Scan
+- Smart TD Scans
 
 ## Development
 
 ```bash
 npm install
-npm run dev          # Dev server
-npm run build        # Production build + DMG
+npm run dev
 ```
+
+Build app + DMG:
+
+```bash
+npm run build
+```
+
+Unsigned local build:
+
+```bash
+npm run build:unsigned
+```
+
+## macOS Signing + Notarization
+
+Bridge is configured for hardened runtime, entitlements, and an `afterSign` notarization hook.
+
+Set these environment variables in CI or your release shell:
+
+- `APPLE_ID`
+- `APPLE_APP_SPECIFIC_PASSWORD`
+- `APPLE_TEAM_ID`
+- `CSC_LINK` (certificate)
+- `CSC_KEY_PASSWORD`
+
+If Apple notarization variables are missing, build still succeeds but notarization is skipped.
 
 ## Requirements
 
-- macOS (Apple Silicon)
+- macOS
 - Node.js 18+
 - Git
-- `gh` CLI (for PR creation)
+- Optional for PR creation: GitHub CLI (`gh`) authenticated with `gh auth login`
