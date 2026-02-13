@@ -1,7 +1,7 @@
-import Store from 'electron-store'
 import { BrowserWindow } from 'electron'
+import { createBridgeStore } from './store'
 
-const store = new Store()
+const store = createBridgeStore('bridge-scheduler')
 
 export type ScheduleFrequency = 'hourly' | 'daily' | 'weekly' | 'monthly'
 

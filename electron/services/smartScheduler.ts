@@ -1,10 +1,10 @@
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import Store from 'electron-store'
 import { BrowserWindow } from 'electron'
+import { createBridgeStore } from './store'
 
 const execAsync = promisify(exec)
-const store = new Store()
+const store = createBridgeStore('bridge-smart-scheduler')
 
 export interface SmartScanSchedule {
   id: string

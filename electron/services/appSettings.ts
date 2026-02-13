@@ -1,11 +1,11 @@
-import Store from 'electron-store'
+import { createBridgeStore } from './store'
 
 export interface AppSettings {
   experimentalFeatures: boolean
   onboardingCompleted: boolean
 }
 
-const store = new Store()
+const store = createBridgeStore('bridge-app-settings')
 const SETTINGS_KEY = 'bridge-app-settings'
 
 const defaultSettings: AppSettings = {

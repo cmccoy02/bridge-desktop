@@ -1,4 +1,4 @@
-import Store from 'electron-store'
+import { createBridgeStore } from './store'
 
 export interface BridgeConsoleSettings {
   consoleUrl: string
@@ -14,7 +14,7 @@ export interface ConsoleUploadResult {
   error?: string
 }
 
-const store = new Store()
+const store = createBridgeStore('bridge-console')
 const SETTINGS_KEY = 'bridge-console-settings'
 
 export function getBridgeConsoleSettings(): BridgeConsoleSettings {

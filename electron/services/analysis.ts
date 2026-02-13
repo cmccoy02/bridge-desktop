@@ -2,8 +2,8 @@ import { exec } from 'child_process'
 import { promisify } from 'util'
 import fs from 'fs/promises'
 import path from 'path'
-import Store from 'electron-store'
 import { app } from 'electron'
+import { createBridgeStore } from './store'
 import {
   detectLanguages,
   getPythonOutdated,
@@ -29,7 +29,7 @@ import {
 } from './bridgeConsoleApi'
 
 const execAsync = promisify(exec)
-const scanStore = new Store()
+const scanStore = createBridgeStore('bridge-analysis')
 const SCAN_HISTORY_KEY = 'td-scan-history'
 const DEFAULT_SCAN_TIMEOUT_MS = 10 * 60 * 1000
 

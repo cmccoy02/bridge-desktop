@@ -40,6 +40,19 @@ export default function PatchBatch() {
     [packages]
   )
 
+  const getUpdateTypeBadgeClass = (updateType: OutdatedPackage['updateType']) => {
+    switch (updateType) {
+      case 'major':
+        return 'badge-warning'
+      case 'minor':
+        return 'badge-accent'
+      case 'patch':
+        return 'badge-success'
+      default:
+        return 'badge'
+    }
+  }
+
   useEffect(() => {
     if (selectedRepo) {
       void loadOutdatedPackages()
@@ -488,6 +501,55 @@ export default function PatchBatch() {
                         </td>
                         <td>{pkg.current}</td>
                         <td className="version-new">{pkg.latest}</td>
+                        <td>{pkg.type === 'devDependencies' ? 'devDep' : 'dep'}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="card" style={{ marginBottom: '16px' }}>
+          <div className="card-header">
+            <h3 className="card-title">All Outdated Dependencies</h3>
+          </div>
+          {packages.length === 0 ? (
+            <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+              No outdated dependencies detected.
+            </div>
+          ) : (
+            <div className="package-table-wrapper">
+              <table className="package-table">
+                <thead>
+                  <tr>
+                    <th>Package Name</th>
+                    <th>Current</th>
+                    <th>Wanted</th>
+                    <th>Latest</th>
+                    <th>Update Type</th>
+                    <th>Type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {packages.map(pkg => {
+                    const key = getPackageKey(pkg)
+                    return (
+                      <tr key={`all-${key}`}>
+                        <td>
+                          <div className="package-name-cell">
+                            <div className="package-name">{pkg.name}</div>
+                          </div>
+                        </td>
+                        <td>{pkg.current}</td>
+                        <td>{pkg.wanted}</td>
+                        <td className="version-new">{pkg.latest}</td>
+                        <td>
+                          <span className={`badge ${getUpdateTypeBadgeClass(pkg.updateType)}`}>
+                            {pkg.updateType}
+                          </span>
+                        </td>
                         <td>{pkg.type === 'devDependencies' ? 'devDep' : 'dep'}</td>
                       </tr>
                     )

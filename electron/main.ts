@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import path from 'path'
-import Store from 'electron-store'
+import { createBridgeStore } from './services/store'
 import {
   scanRepository,
   scanForRepos,
@@ -75,7 +75,7 @@ import {
   saveAppSettings,
   isExperimentalFeaturesEnabled
 } from './services/appSettings'
-const store = new Store()
+const store = createBridgeStore('bridge-main')
 const CODE_DIRECTORY_KEY = 'bridge-code-directory'
 
 let mainWindow: BrowserWindow | null = null
