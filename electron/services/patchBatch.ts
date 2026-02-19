@@ -46,6 +46,7 @@ export interface NonBreakingUpdateConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
   prTitle?: string
@@ -139,6 +140,298 @@ async function runCommand(
     timeout: options.timeout ?? DEFAULT_TEST_TIMEOUT_MS,
     maxBuffer: options.maxBuffer ?? DEFAULT_MAX_BUFFER
   })
+}
+
+type PackageManager = 'npm' | 'yarn' | 'pnpm'
+type ValidationStage = 'test' | 'lint' | 'build'
+
+interface ValidationStep {
+  command: string
+  relativeCwd: string
+  stage: ValidationStage
+  label: string
+}
+
+async function detectNodePackageManager(repoPath: string): Promise<PackageManager> {
+  if (await fileExists(path.join(repoPath, 'pnpm-lock.yaml'))) {
+    return 'pnpm'
+  }
+  if (await fileExists(path.join(repoPath, 'yarn.lock'))) {
+    return 'yarn'
+  }
+  return 'npm'
+}
+
+function isMissingCommandOutput(output: string): boolean {
+  return (
+    /command not found/i.test(output) ||
+    /is not recognized as an internal or external command/i.test(output) ||
+    /missing script/i.test(output) ||
+    /npm ERR! Missing script/i.test(output) ||
+    /ERR_PNPM_NO_SCRIPT/i.test(output) ||
+    /Couldn't find a script named/i.test(output)
+  )
+}
+
+function getScriptCommand(packageManager: PackageManager, scriptName: ValidationStage): string {
+  if (packageManager === 'yarn') {
+    return scriptName === 'test' ? 'yarn test' : `yarn ${scriptName}`
+  }
+  if (packageManager === 'pnpm') {
+    return scriptName === 'test' ? 'pnpm test' : `pnpm run ${scriptName}`
+  }
+  return scriptName === 'test' ? 'npm test' : `npm run ${scriptName}`
+}
+
+function normalizePathForMatch(value: string): string {
+  return value.replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '__DOUBLE_STAR__')
+    .replace(/\*/g, '[^/]+')
+    .replace(/__DOUBLE_STAR__/g, '.*')
+  return new RegExp(`^${escaped}$`)
+}
+
+async function collectPackageJsonDirectories(
+  repoPath: string,
+  maxDepth = 6
+): Promise<string[]> {
+  const results: string[] = []
+  const skipDirs = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', 'out'])
+
+  const walk = async (absoluteDir: string, relativeDir: string, depth: number): Promise<void> => {
+    if (depth > maxDepth) return
+
+    const packageJsonPath = path.join(absoluteDir, 'package.json')
+    if (relativeDir !== '.' && await fileExists(packageJsonPath)) {
+      results.push(relativeDir)
+    }
+
+    if (depth === maxDepth) return
+
+    let entries: import('fs').Dirent[]
+    try {
+      entries = await fs.readdir(absoluteDir, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      if (skipDirs.has(entry.name)) continue
+      const nextAbsolute = path.join(absoluteDir, entry.name)
+      const nextRelative = relativeDir === '.' ? entry.name : path.join(relativeDir, entry.name)
+      await walk(nextAbsolute, normalizePathForMatch(nextRelative), depth + 1)
+    }
+  }
+
+  await walk(repoPath, '.', 0)
+  return results
+}
+
+async function getWorkspacePatterns(repoPath: string, packageJson: any): Promise<string[]> {
+  const patterns = new Set<string>()
+  const rawWorkspaces = packageJson?.workspaces
+
+  if (Array.isArray(rawWorkspaces)) {
+    rawWorkspaces.forEach(value => {
+      if (typeof value === 'string' && value.trim()) {
+        patterns.add(normalizePathForMatch(value.trim()))
+      }
+    })
+  } else if (rawWorkspaces && Array.isArray(rawWorkspaces.packages)) {
+    rawWorkspaces.packages.forEach((value: unknown) => {
+      if (typeof value === 'string' && value.trim()) {
+        patterns.add(normalizePathForMatch(value.trim()))
+      }
+    })
+  }
+
+  const pnpmWorkspacePath = path.join(repoPath, 'pnpm-workspace.yaml')
+  if (await fileExists(pnpmWorkspacePath)) {
+    try {
+      const yaml = await fs.readFile(pnpmWorkspacePath, 'utf-8')
+      for (const line of yaml.split(/\r?\n/)) {
+        const match = line.match(/^\s*-\s*['"]?([^'"]+)['"]?\s*$/)
+        if (match?.[1]) {
+          patterns.add(normalizePathForMatch(match[1]))
+        }
+      }
+    } catch {
+      // Ignore malformed workspace yaml; fallback to package.json workspaces.
+    }
+  }
+
+  return Array.from(patterns)
+}
+
+async function resolveWorkspaceValidationSteps(
+  repoPath: string,
+  packageManager: PackageManager,
+  workspacePatterns: string[],
+  rootHasStage: Record<ValidationStage, boolean>
+): Promise<ValidationStep[]> {
+  if (workspacePatterns.length === 0) {
+    return []
+  }
+
+  const patternMatchers = workspacePatterns.map(pattern => globToRegExp(pattern))
+  const allPackageDirs = await collectPackageJsonDirectories(repoPath)
+  const matchedPackageDirs = allPackageDirs
+    .map(normalizePathForMatch)
+    .filter(relativeDir => patternMatchers.some(pattern => pattern.test(relativeDir)))
+
+  const stages: ValidationStage[] = ['test', 'lint', 'build']
+  const byStage: Record<ValidationStage, ValidationStep[]> = {
+    test: [],
+    lint: [],
+    build: []
+  }
+  const seen = new Set<string>()
+
+  for (const relativeDir of matchedPackageDirs) {
+    const packageJsonPath = path.join(repoPath, relativeDir, 'package.json')
+    let workspaceJson: any
+    try {
+      workspaceJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'))
+    } catch {
+      continue
+    }
+    const scripts = workspaceJson?.scripts || {}
+
+    for (const stage of stages) {
+      if (rootHasStage[stage]) {
+        continue
+      }
+      const hasScript = typeof scripts[stage] === 'string' && scripts[stage].trim().length > 0
+      if (!hasScript) {
+        continue
+      }
+      const command = getScriptCommand(packageManager, stage)
+      const step: ValidationStep = {
+        command,
+        relativeCwd: relativeDir,
+        stage,
+        label: `${relativeDir} (${stage})`
+      }
+      const dedupeKey = `${step.relativeCwd}::${step.command}`
+      if (seen.has(dedupeKey)) {
+        continue
+      }
+      seen.add(dedupeKey)
+      byStage[stage].push(step)
+    }
+  }
+
+  return [...byStage.test, ...byStage.lint, ...byStage.build]
+}
+
+async function resolveJavascriptValidationCommands(
+  repoPath: string,
+  overrideCommand?: string
+): Promise<ValidationStep[]> {
+  if (overrideCommand?.trim()) {
+    return [{
+      command: overrideCommand.trim(),
+      relativeCwd: '.',
+      stage: 'test',
+      label: 'custom'
+    }]
+  }
+
+  const packageManager = await detectNodePackageManager(repoPath)
+  const packageJsonPath = path.join(repoPath, 'package.json')
+  if (!(await fileExists(packageJsonPath))) {
+    return []
+  }
+
+  const packageJsonRaw = await fs.readFile(packageJsonPath, 'utf-8')
+  const packageJson = JSON.parse(packageJsonRaw)
+  const scripts = packageJson?.scripts || {}
+  const hasScript = (name: string) => typeof scripts[name] === 'string' && scripts[name].trim().length > 0
+
+  const stages: ValidationStage[] = ['test', 'lint', 'build']
+  const rootHasStage: Record<ValidationStage, boolean> = {
+    test: hasScript('test'),
+    lint: hasScript('lint'),
+    build: hasScript('build')
+  }
+
+  const rootSteps: ValidationStep[] = stages
+    .filter(stage => rootHasStage[stage])
+    .map(stage => ({
+      command: getScriptCommand(packageManager, stage),
+      relativeCwd: '.',
+      stage,
+      label: `root (${stage})`
+    }))
+
+  const workspacePatterns = await getWorkspacePatterns(repoPath, packageJson)
+  const workspaceSteps = await resolveWorkspaceValidationSteps(
+    repoPath,
+    packageManager,
+    workspacePatterns,
+    rootHasStage
+  )
+
+  return [...rootSteps, ...workspaceSteps]
+}
+
+async function runValidationSteps(
+  steps: ValidationStep[],
+  repoRoot: string,
+  onLog: (message: string) => void,
+  onWarning: (warning: { message: string; output: string }) => void,
+  options: { timeoutMs: number; stageLabel: string }
+): Promise<{ success: boolean; output: string }> {
+  const allOutput: string[] = []
+
+  for (const step of steps) {
+    const command = step.command
+    const stepCwd = step.relativeCwd === '.'
+      ? repoRoot
+      : path.join(repoRoot, step.relativeCwd)
+    onLog(`${step.relativeCwd === '.' ? '[root]' : `[${step.relativeCwd}]`} > ${command}`)
+    try {
+      const { stdout, stderr } = await runCommand(command, stepCwd, {
+        timeout: options.timeoutMs,
+        maxBuffer: DEFAULT_MAX_BUFFER
+      })
+      const output = `${stdout}${stderr}`.trim()
+      if (output) {
+        splitOutputLines(output).forEach(line => onLog(line))
+        allOutput.push(output)
+      }
+    } catch (error: any) {
+      const output = `${error?.stdout || ''}${error?.stderr || ''}`.trim() || String(error?.message || '')
+      if (output) {
+        splitOutputLines(output).forEach(line => onLog(line))
+        allOutput.push(output)
+      }
+
+      if (isMissingCommandOutput(output)) {
+        onWarning({
+          message: `${options.stageLabel}: command not found, skipping '${command}' in ${step.relativeCwd}`,
+          output
+        })
+        continue
+      }
+
+      return {
+        success: false,
+        output: allOutput.join('\n\n')
+      }
+    }
+  }
+
+  return {
+    success: true,
+    output: allOutput.join('\n\n')
+  }
 }
 
 async function createIsolatedWorkspace(repoPath: string, branchName: string): Promise<string> {
@@ -342,7 +635,7 @@ export async function runPatchBatchPipeline(
   const onWarning = handlers.onWarning || (() => {})
   const safeBranchName = normalizeBranchName(branchName)
 
-  const totalSteps = 5 + (shouldRunTests ? 1 : 0) + (createPR ? 2 : 0)
+  const totalSteps = 4 + (shouldRunTests ? 1 : 0) + (createPR ? 2 : 0)
   let currentStep = 0
 
   const primaryLang = packages[0]?.language || 'javascript'
@@ -612,6 +905,7 @@ export async function runNonBreakingUpdatePipeline(
     branchName,
     createPR,
     runTests: shouldRunTests,
+    selectedMajorPackages = [],
     testCommand,
     testTimeoutMs,
     prTitle,
@@ -623,11 +917,15 @@ export async function runNonBreakingUpdatePipeline(
   const onWarning = handlers.onWarning || (() => {})
   const safeBranchName = normalizeBranchName(branchName)
 
-  const totalSteps = 5 + (shouldRunTests ? 1 : 0) + (createPR ? 2 : 0)
+  const totalSteps = 4 + (shouldRunTests ? 2 : 0) + (selectedMajorPackages.length > 0 ? 1 : 0) + (createPR ? 2 : 0)
   let currentStep = 0
   let workspacePath = repoPath
   let workspaceCreated = false
   let deleteBranchOnCleanup = true
+  const validationOutput: string[] = []
+  const validationCommands = shouldRunTests
+    ? await resolveJavascriptValidationCommands(repoPath, testCommand)
+    : []
 
   const fail = async (message: string, extra?: Partial<PatchBatchResult>): Promise<PatchBatchResult> => {
     onLog(`✗ ${message}`)
@@ -653,23 +951,45 @@ export async function runNonBreakingUpdatePipeline(
     }
   }
 
-  const resolvedTestCommand = shouldRunTests ? (testCommand?.trim() || getTestCommand('javascript')) : null
-  if (shouldRunTests && !resolvedTestCommand) {
-    return fail("No test script found - add one to package.json or uncheck 'Run tests'.")
-  }
-
   try {
+    const beforeOutdated = await getJsOutdatedPackages(repoPath)
+    const nonBreakingBefore = beforeOutdated.filter(pkg => pkg.isNonBreaking)
+    if (nonBreakingBefore.length === 0 && selectedMajorPackages.length === 0) {
+      return fail('No non-breaking updates available and no major packages selected.')
+    }
+
+    if (shouldRunTests) {
+      if (validationCommands.length === 0) {
+        onWarning({
+          message: 'No validation scripts found (test/lint/build). Continuing without pre/post validation checks.',
+          output: 'Define scripts in package.json to enable automated validation.'
+        })
+      } else {
+        onProgress('Running pre-update validation...', ++currentStep, totalSteps)
+        onLog('[1/5] Running baseline validation in current repo...')
+        const baselineValidation = await runValidationSteps(
+          validationCommands,
+          repoPath,
+          onLog,
+          onWarning,
+          { timeoutMs: testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, stageLabel: 'Pre-update validation' }
+        )
+        validationOutput.push(baselineValidation.output)
+        if (!baselineValidation.success) {
+          return fail('Pre-update validation failed. Update aborted before dependency changes.', {
+            testsPassed: false,
+            testOutput: baselineValidation.output
+          })
+        }
+        onLog('✓ Baseline validation passed')
+      }
+    }
+
     onProgress('Preparing isolated update workspace...', ++currentStep, totalSteps)
     workspacePath = await createIsolatedWorkspace(repoPath, safeBranchName)
     workspaceCreated = true
     onLog(`Using isolated workspace: ${workspacePath}`)
     onLog('Local repository changes are left untouched.')
-
-    const beforeOutdated = await getJsOutdatedPackages(workspacePath)
-    const nonBreakingBefore = beforeOutdated.filter(pkg => pkg.isNonBreaking)
-    if (nonBreakingBefore.length === 0) {
-      return fail('No non-breaking (patch/minor) updates available.')
-    }
 
     if (await fileExists(path.join(workspacePath, '.npmrc'))) {
       onLog('Using repository-local .npmrc for npm commands.')
@@ -681,7 +1001,7 @@ export async function runNonBreakingUpdatePipeline(
     }
 
     onProgress('Running non-breaking update sequence...', ++currentStep, totalSteps)
-    onLog('[1/3] Running update script:')
+    onLog('[2/5] Running update script:')
     onLog('rm -rf node_modules package-lock.json; npm install; npm update; rm -rf node_modules package-lock.json; npm install;')
     try {
       const { stdout, stderr } = await runCommand(
@@ -699,10 +1019,27 @@ export async function runNonBreakingUpdatePipeline(
       return fail('Non-breaking update script failed. Check npm output.')
     }
 
-    onProgress('Evaluating changes...', ++currentStep, totalSteps)
-    const changed = await hasGitChanges(workspacePath)
-    if (!changed) {
-      return fail('No dependency changes were produced by the update script.')
+    const majorUpdated: string[] = []
+    if (selectedMajorPackages.length > 0) {
+      onProgress('Applying selected major updates...', ++currentStep, totalSteps)
+      onLog('[3/5] Applying selected major updates...')
+      for (const pkg of selectedMajorPackages) {
+        try {
+          onLog(`> npm install ${pkg}@latest`)
+          const { stdout, stderr } = await runCommand(`npm install ${pkg}@latest`, workspacePath, {
+            timeout: DEFAULT_TEST_TIMEOUT_MS,
+            maxBuffer: DEFAULT_MAX_BUFFER
+          })
+          splitOutputLines(`${stdout}${stderr}`).forEach(line => onLog(line))
+          majorUpdated.push(pkg)
+        } catch (error: any) {
+          const output = `${error?.stdout || ''}${error?.stderr || ''}`.trim() || String(error?.message || '')
+          splitOutputLines(output).forEach(line => onLog(line))
+          return fail(`Failed to apply selected major update: ${pkg}`, {
+            testOutput: output
+          })
+        }
+      }
     }
 
     const afterOutdated = await getJsOutdatedPackages(workspacePath)
@@ -710,30 +1047,36 @@ export async function runNonBreakingUpdatePipeline(
     const updatedPackages = nonBreakingBefore
       .map(pkg => pkg.name)
       .filter(name => !remainingNonBreaking.has(name))
-
-    if (shouldRunTests && resolvedTestCommand) {
-      onProgress('Running tests...', ++currentStep, totalSteps)
-      onLog('[2/3] Running tests...')
-      onLog(`> ${resolvedTestCommand}`)
-      const testResult = await runTests(workspacePath, resolvedTestCommand, {
-        timeoutMs: testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS
-      })
-      splitOutputLines(testResult.output).forEach(line => onLog(line))
-      if (!testResult.success) {
-        return fail('Tests failed - no PR created.', {
-          testsPassed: false,
-          testOutput: testResult.output
-        })
+    for (const pkg of majorUpdated) {
+      if (!updatedPackages.includes(pkg)) {
+        updatedPackages.push(pkg)
       }
-      onLog('✓ All tests passed')
     }
 
-    const lintCommand = getLintCommand('javascript')
-    if (lintCommand) {
-      const lintResult = await runLint(workspacePath, lintCommand)
-      if (!lintResult.success) {
-        onWarning({ message: 'Linter found issues', output: lintResult.output })
+    onProgress('Evaluating changes...', ++currentStep, totalSteps)
+    const changed = await hasGitChanges(workspacePath)
+    if (!changed) {
+      return fail('No dependency changes were produced by the update process.')
+    }
+
+    if (shouldRunTests && validationCommands.length > 0) {
+      onProgress('Running post-update validation...', ++currentStep, totalSteps)
+      onLog('[4/5] Running validation after dependency changes...')
+      const postValidation = await runValidationSteps(
+        validationCommands,
+        workspacePath,
+        onLog,
+        onWarning,
+        { timeoutMs: testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, stageLabel: 'Post-update validation' }
+      )
+      validationOutput.push(postValidation.output)
+      if (!postValidation.success) {
+        return fail('Post-update validation failed. No commit was created.', {
+          testsPassed: false,
+          testOutput: postValidation.output
+        })
       }
+      onLog('✓ Post-update validation passed')
     }
 
     onProgress('Committing changes...', ++currentStep, totalSteps)
@@ -745,12 +1088,15 @@ export async function runNonBreakingUpdatePipeline(
     deleteBranchOnCleanup = false
 
     if (!createPR) {
-      onLog('[3/3] Committing updates...')
-      onLog(`✓ Updates committed to branch '${safeBranchName}'`)
+      onLog('[5/5] Committing updates locally...')
+      onLog(`✓ Changes committed on '${safeBranchName}'`)
+      onLog(`✓ Ready to push: git push -u origin ${safeBranchName}`)
       return {
         success: true,
         branchName: safeBranchName,
-        updatedPackages
+        updatedPackages,
+        testsPassed: shouldRunTests ? true : undefined,
+        testOutput: validationOutput.filter(Boolean).join('\n\n')
       }
     }
 
@@ -774,7 +1120,9 @@ export async function runNonBreakingUpdatePipeline(
       success: true,
       branchName: safeBranchName,
       prUrl,
-      updatedPackages
+      updatedPackages,
+      testsPassed: shouldRunTests ? true : undefined,
+      testOutput: validationOutput.filter(Boolean).join('\n\n')
     }
   } catch (error) {
     return fail(formatError(error, 'Non-breaking update failed.'))

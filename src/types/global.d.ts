@@ -10,8 +10,10 @@ import type {
   NonBreakingUpdateConfig,
   SecurityPatchConfig,
   SecurityPatchResult,
+  PushBranchResult,
   RepoInfo,
   ScheduledJob,
+  ScheduledJobCreateInput,
   SmartScanSchedule,
   JobResult,
   ScanResult,
@@ -55,6 +57,7 @@ declare global {
       runPatchBatch: (config: PatchBatchConfig) => Promise<PatchBatchResult>
       runNonBreakingUpdate: (config: NonBreakingUpdateConfig) => Promise<PatchBatchResult>
       runSecurityPatch: (config: SecurityPatchConfig) => Promise<SecurityPatchResult>
+      pushBranch: (repoPath: string, branchName: string) => Promise<PushBranchResult>
       onPatchBatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
       onPatchBatchWarning: (callback: (warning: { message: string; output: string }) => void) => () => void
       onPatchBatchLog: (callback: (entry: { message: string }) => void) => () => void
@@ -65,7 +68,8 @@ declare global {
       predictMergeConflicts: (repoPath: string) => Promise<ConflictWarning[]>
       getGitHubCliStatus: (repoPath: string) => Promise<GitHubCliStatus>
       getScheduledJobs: () => Promise<ScheduledJob[]>
-      addScheduledJob: (job: Omit<ScheduledJob, 'id' | 'createdAt' | 'lastRun' | 'nextRun'>) => Promise<ScheduledJob>
+      addScheduledJob: (job: ScheduledJobCreateInput) => Promise<ScheduledJob>
+      addScheduledJobsBatch: (jobs: ScheduledJobCreateInput[]) => Promise<ScheduledJob[]>
       updateScheduledJob: (jobId: string, updates: Partial<ScheduledJob>) => Promise<ScheduledJob | null>
       deleteScheduledJob: (jobId: string) => Promise<boolean>
       getJobResults: (jobId?: string) => Promise<JobResult[]>

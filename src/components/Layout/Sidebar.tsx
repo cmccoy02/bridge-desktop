@@ -22,8 +22,6 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
     selectedRepo,
     codeDirectory,
     selectRepository,
-    addRepository,
-    removeRepository,
     selectAndScanCodeDirectory,
     scanCodeDirectory
   } = useRepositories()
@@ -50,13 +48,6 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
 
   const handleSelectCodeDirectory = async () => {
     await selectAndScanCodeDirectory()
-  }
-
-  const handleImportSingleRepo = async () => {
-    const repoPath = await window.bridge.selectDirectory()
-    if (repoPath) {
-      await addRepository(repoPath)
-    }
   }
 
   return (
@@ -162,14 +153,6 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
             </svg>
             {codeDirectory ? 'Change Code Directory' : 'Select Code Directory'}
           </button>
-          <button className="nav-item" onClick={handleImportSingleRepo}>
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M20 21V8a2 2 0 0 0-2-2h-4l-2-3H6a2 2 0 0 0-2 2v16" />
-              <line x1="12" y1="11" x2="12" y2="17" />
-              <line x1="9" y1="14" x2="15" y2="14" />
-            </svg>
-            Import Single Repo
-          </button>
           {codeDirectory && (
             <button className="nav-item" onClick={() => scanCodeDirectory()}>
               <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -207,16 +190,6 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
                   {(repo.languages?.length ?? 0) > 1 && (
                     <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>+{repo.languages!.length - 1}</span>
                   )}
-                  <button
-                    className="repo-remove"
-                    title="Remove repository"
-                    onClick={async (event) => {
-                      event.stopPropagation()
-                      await removeRepository(repo.path)
-                    }}
-                  >
-                    ×
-                  </button>
                 </button>
               )
             })}

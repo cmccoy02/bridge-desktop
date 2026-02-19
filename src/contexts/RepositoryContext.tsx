@@ -25,39 +25,34 @@ export function RepositoryProvider({ children }: { children: React.ReactNode }) 
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    loadRepositories()
-  }, [])
+    const bootstrap = async () => {
+      try {
+        const savedCodeDirectory = await window.bridge.getCodeDirectory()
+        if (savedCodeDirectory && await window.bridge.directoryExists(savedCodeDirectory)) {
+          setCodeDirectoryState(savedCodeDirectory)
+          await scanCodeDirectory(savedCodeDirectory)
+          return
+        }
 
-  const loadRepositories = async () => {
-    try {
-      const existingRepos = await window.bridge.cleanupMissingRepos()
-      setRepositories(existingRepos)
-
-      // If selected repo no longer exists, deselect it
-      if (selectedRepo && !existingRepos.find((r: Repository) => r.path === selectedRepo.path)) {
-        setSelectedRepo(null)
-      }
-
-      const savedCodeDirectory = await window.bridge.getCodeDirectory()
-      if (savedCodeDirectory && await window.bridge.directoryExists(savedCodeDirectory)) {
-        setCodeDirectoryState(savedCodeDirectory)
-        await scanCodeDirectory(savedCodeDirectory)
-      } else {
         const defaultDirectory = await window.bridge.getDefaultCodeDirectory()
         if (defaultDirectory && await window.bridge.directoryExists(defaultDirectory)) {
           await window.bridge.saveCodeDirectory(defaultDirectory)
           setCodeDirectoryState(defaultDirectory)
           await scanCodeDirectory(defaultDirectory)
-        } else {
-          setCodeDirectoryState(savedCodeDirectory || null)
+          return
         }
+
+        setCodeDirectoryState(savedCodeDirectory || null)
+        setRepositories([])
+      } catch (error) {
+        console.error('Failed to initialize repositories:', error)
+      } finally {
+        setLoading(false)
       }
-    } catch (error) {
-      console.error('Failed to load repositories:', error)
-    } finally {
-      setLoading(false)
     }
-  }
+
+    void bootstrap()
+  }, [])
 
   const addRepository = async (path: string) => {
     const repo = await window.bridge.scanRepository(path)
@@ -72,15 +67,12 @@ export function RepositoryProvider({ children }: { children: React.ReactNode }) 
       return
     }
 
-    const updated = [...repositories, repo]
-    await window.bridge.saveRepositories(updated)
-    setRepositories(updated)
+    setRepositories(prev => [...prev, repo])
     setSelectedRepo(repo)
   }
 
   const removeRepository = async (path: string) => {
-    const updated = await window.bridge.removeRepository(path)
-    setRepositories(updated.filter((r: Repository) => r.exists))
+    setRepositories(prev => prev.filter(r => r.path !== path))
 
     if (selectedRepo?.path === path) {
       setSelectedRepo(null)
@@ -127,15 +119,14 @@ export function RepositoryProvider({ children }: { children: React.ReactNode }) 
   const refreshRepositories = async () => {
     setLoading(true)
     try {
-      await loadRepositories()
+      await scanCodeDirectory()
     } finally {
       setLoading(false)
     }
   }
 
   const cleanupMissingRepos = async () => {
-    const cleaned = await window.bridge.cleanupMissingRepos()
-    setRepositories(cleaned)
+    await scanCodeDirectory()
   }
 
   return (

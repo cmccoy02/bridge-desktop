@@ -1,13 +1,75 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
 import { useAppSettings } from '../../contexts/AppSettingsContext'
-import type { ScheduledJob, ScheduleFrequency, JobResult, SmartScanSchedule } from '../../types'
+import type { ScheduledJob, ScheduleFrequency, JobResult, SmartScanSchedule, ScheduledJobCreateInput } from '../../types'
 
 const FREQUENCY_LABELS: Record<ScheduleFrequency, string> = {
   hourly: 'Hourly',
   daily: 'Daily',
   weekly: 'Weekly',
   monthly: 'Monthly'
+}
+
+const WEEKDAY_OPTIONS = [
+  { value: 0, short: 'Sun', long: 'Sunday' },
+  { value: 1, short: 'Mon', long: 'Monday' },
+  { value: 2, short: 'Tue', long: 'Tuesday' },
+  { value: 3, short: 'Wed', long: 'Wednesday' },
+  { value: 4, short: 'Thu', long: 'Thursday' },
+  { value: 5, short: 'Fri', long: 'Friday' },
+  { value: 6, short: 'Sat', long: 'Saturday' }
+] as const
+
+function getDefaultStartDate(): string {
+  const date = new Date()
+  date.setDate(date.getDate() + 1)
+  return date.toISOString().slice(0, 10)
+}
+
+function getDefaultTimeOfDay(): string {
+  return '06:00'
+}
+
+function buildStartAtIso(startDate: string, timeOfDay: string): string {
+  const dateTime = new Date(`${startDate}T${timeOfDay}:00`)
+  if (Number.isNaN(dateTime.getTime())) {
+    return new Date().toISOString()
+  }
+  return dateTime.toISOString()
+}
+
+function formatTimeOfDay(timeOfDay: string): string {
+  const [hourRaw, minuteRaw] = timeOfDay.split(':').map(Number)
+  const date = new Date()
+  date.setHours(Number.isFinite(hourRaw) ? hourRaw : 0, Number.isFinite(minuteRaw) ? minuteRaw : 0, 0, 0)
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+function formatJobRecurrence(job: ScheduledJob): string {
+  const formattedTime = formatTimeOfDay(job.timeOfDay)
+
+  switch (job.frequency) {
+    case 'hourly':
+      return `Every ${job.intervalHours} hour${job.intervalHours === 1 ? '' : 's'}`
+    case 'daily':
+      return `Every day at ${formattedTime}`
+    case 'weekly': {
+      const days = (job.daysOfWeek || [])
+        .map(day => WEEKDAY_OPTIONS.find(option => option.value === day)?.short)
+        .filter(Boolean)
+      return `Weekly on ${days.length ? days.join(', ') : 'selected days'} at ${formattedTime}`
+    }
+    case 'monthly':
+      return `Monthly on day ${job.dayOfMonth} at ${formattedTime}`
+    default:
+      return 'Custom recurrence'
+  }
+}
+
+function formatDate(dateStr: string | null) {
+  if (!dateStr) return 'Never'
+  const date = new Date(dateStr)
+  return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
 export default function Scheduler() {
@@ -21,11 +83,41 @@ export default function Scheduler() {
   const [smartMessage, setSmartMessage] = useState<string | null>(null)
 
   // New job form state
-  const [selectedRepo, setSelectedRepo] = useState('')
+  const [selectedRepos, setSelectedRepos] = useState<Set<string>>(new Set())
   const [frequency, setFrequency] = useState<ScheduleFrequency>('weekly')
-  const [createPR, setCreatePR] = useState(false)
-  const [runTests, setRunTests] = useState(true)
+  const runTests = true
+  const [startDate, setStartDate] = useState(getDefaultStartDate())
+  const [timeOfDay, setTimeOfDay] = useState(getDefaultTimeOfDay())
+  const [intervalHours, setIntervalHours] = useState(24)
+  const [weeklyDays, setWeeklyDays] = useState<Set<number>>(new Set([new Date().getDay()]))
+  const [monthlyDay, setMonthlyDay] = useState(new Date().getDate())
   const [smartRepo, setSmartRepo] = useState('')
+
+  const availableRepos = useMemo(
+    () => repositories.filter(repo => repo.exists && repo.hasGit),
+    [repositories]
+  )
+
+  const recurrenceSummary = useMemo(() => {
+    const formattedTime = formatTimeOfDay(timeOfDay)
+    switch (frequency) {
+      case 'hourly':
+        return `Runs every ${intervalHours} hour${intervalHours === 1 ? '' : 's'}, starting ${formattedTime}`
+      case 'daily':
+        return `Runs every day at ${formattedTime}`
+      case 'weekly': {
+        const labels = Array.from(weeklyDays)
+          .sort((a, b) => a - b)
+          .map(day => WEEKDAY_OPTIONS.find(option => option.value === day)?.long)
+          .filter(Boolean)
+        return `Runs every week on ${labels.length ? labels.join(', ') : 'selected days'} at ${formattedTime}`
+      }
+      case 'monthly':
+        return `Runs every month on day ${monthlyDay} at ${formattedTime}`
+      default:
+        return 'Runs on a recurring schedule'
+    }
+  }, [frequency, intervalHours, monthlyDay, timeOfDay, weeklyDays])
 
   useEffect(() => {
     loadJobs()
@@ -65,28 +157,76 @@ export default function Scheduler() {
     }
   }
 
+  const resetForm = () => {
+    setSelectedRepos(new Set())
+    setFrequency('weekly')
+    setStartDate(getDefaultStartDate())
+    setTimeOfDay(getDefaultTimeOfDay())
+    setIntervalHours(24)
+    setWeeklyDays(new Set([new Date().getDay()]))
+    setMonthlyDay(new Date().getDate())
+  }
+
   const addJob = async () => {
-    if (!selectedRepo) return
+    if (selectedRepos.size === 0) return
 
-    const repo = repositories.find(r => r.path === selectedRepo)
-    if (!repo) return
+    const selectedWeeklyDays = Array.from(weeklyDays).sort((a, b) => a - b)
+    const startAt = buildStartAtIso(startDate, timeOfDay)
 
-    try {
-      await window.bridge.addScheduledJob({
+    const batchInputs: ScheduledJobCreateInput[] = availableRepos
+      .filter(repo => selectedRepos.has(repo.path))
+      .map(repo => ({
         repoPath: repo.path,
         repoName: repo.name,
         frequency,
+        intervalHours: frequency === 'hourly' ? Math.max(1, Math.min(24, intervalHours)) : undefined,
+        daysOfWeek: frequency === 'weekly' ? (selectedWeeklyDays.length ? selectedWeeklyDays : [new Date(startAt).getDay()]) : undefined,
+        dayOfMonth: frequency === 'monthly' ? Math.max(1, Math.min(31, monthlyDay)) : undefined,
+        timeOfDay,
+        startAt,
         enabled: true,
         language: repo.languages?.[0] || 'javascript',
-        createPR,
+        createPR: false,
         runTests
-      })
+      }))
+
+    if (batchInputs.length === 0) return
+
+    try {
+      await window.bridge.addScheduledJobsBatch(batchInputs)
       await loadJobs()
       setShowAddModal(false)
-      setSelectedRepo('')
+      resetForm()
     } catch (error) {
       console.error('Failed to add job:', error)
     }
+  }
+
+  const toggleSelectedRepo = (repoPath: string) => {
+    setSelectedRepos(prev => {
+      const next = new Set(prev)
+      if (next.has(repoPath)) {
+        next.delete(repoPath)
+      } else {
+        next.add(repoPath)
+      }
+      return next
+    })
+  }
+
+  const toggleWeeklyDay = (day: number) => {
+    setWeeklyDays(prev => {
+      const next = new Set(prev)
+      if (next.has(day)) {
+        if (next.size === 1) {
+          return next
+        }
+        next.delete(day)
+      } else {
+        next.add(day)
+      }
+      return next
+    })
   }
 
   const toggleJob = async (jobId: string, enabled: boolean) => {
@@ -138,12 +278,6 @@ export default function Scheduler() {
     }
   }
 
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return 'Never'
-    const date = new Date(dateStr)
-    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  }
-
   const getJobResults = (jobId: string) => {
     return results.filter(r => r.jobId === jobId).slice(0, 5)
   }
@@ -163,7 +297,7 @@ export default function Scheduler() {
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
-            Add Schedule
+            New Recurring Update
           </button>
         </div>
       </div>
@@ -175,7 +309,7 @@ export default function Scheduler() {
           </div>
           <div style={{ padding: '0 16px 16px' }}>
             <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '12px' }}>
-              Bridge will analyze commit patterns and schedule scans during low-activity hours.
+              Bridge analyzes commit patterns and schedules scans during low-activity hours.
             </p>
 
             {smartMessage && <div className="alert success" style={{ marginBottom: '12px' }}>{smartMessage}</div>}
@@ -188,7 +322,7 @@ export default function Scheduler() {
                 style={{ minWidth: '220px' }}
               >
                 <option value="">Select repository...</option>
-                {repositories.filter(r => r.exists && r.hasGit).map(repo => (
+                {availableRepos.map(repo => (
                   <option key={repo.path} value={repo.path}>
                     {repo.name}
                   </option>
@@ -239,9 +373,9 @@ export default function Scheduler() {
               <polyline points="12 6 12 12 16 14" />
             </svg>
             <h3 className="empty-state-title">No scheduled jobs</h3>
-            <p className="empty-state-desc">Create a schedule to automatically update packages</p>
+            <p className="empty-state-desc">Create a recurring event to automate non-breaking dependency updates.</p>
             <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
-              Add Schedule
+              Create First Schedule
             </button>
           </div>
         </div>
@@ -276,8 +410,11 @@ export default function Scheduler() {
                     </span>
                     <span className="badge badge-accent">{FREQUENCY_LABELS[job.frequency]}</span>
                   </div>
-                  <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                  <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
                     {job.repoPath}
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                    {formatJobRecurrence(job)}
                   </div>
 
                   <div style={{ display: 'flex', gap: '24px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
@@ -289,11 +426,10 @@ export default function Scheduler() {
                     </div>
                     <div>
                       <span style={{ color: 'var(--text-secondary)' }}>Options:</span>{' '}
-                      {job.createPR ? 'Create PR' : 'No PR'}, {job.runTests ? 'Run tests' : 'Skip tests'}
+                      Local commit only, {job.runTests ? 'run tests' : 'skip tests'}
                     </div>
                   </div>
 
-                  {/* Recent results */}
                   {getJobResults(job.id).length > 0 && (
                     <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-color)' }}>
                       <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>Recent runs:</div>
@@ -352,7 +488,6 @@ export default function Scheduler() {
         </div>
       )}
 
-      {/* Add Schedule Modal */}
       {showAddModal && (
         <div
           style={{
@@ -361,100 +496,179 @@ export default function Scheduler() {
             left: 0,
             right: 0,
             bottom: 0,
-            background: 'rgba(0, 0, 0, 0.5)',
+            background: 'rgba(2, 6, 23, 0.65)',
+            backdropFilter: 'blur(4px)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             zIndex: 1000
           }}
-          onClick={() => setShowAddModal(false)}
+          onClick={() => {
+            setShowAddModal(false)
+            resetForm()
+          }}
         >
           <div
             className="card"
-            style={{ width: '100%', maxWidth: '480px', margin: '20px' }}
+            style={{ width: '100%', maxWidth: '760px', margin: '20px', maxHeight: '90vh', overflow: 'auto' }}
             onClick={e => e.stopPropagation()}
           >
-            <h3 style={{ marginBottom: '20px' }}>Add Schedule</h3>
+            <div style={{ marginBottom: '18px' }}>
+              <h3 style={{ marginBottom: '6px' }}>Create Recurring Update</h3>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                Configure this like a calendar event. Bridge will run non-breaking dependency updates on the schedule.
+              </p>
+            </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '18px' }}>
               <div>
-                <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                  Repository
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  Repositories
                 </label>
-                <select
-                  className="input"
-                  value={selectedRepo}
-                  onChange={e => setSelectedRepo(e.target.value)}
-                  style={{ cursor: 'pointer' }}
-                >
-                  <option value="">Select a repository...</option>
-                  {repositories.filter(r => r.exists && r.hasGit).map(repo => (
-                    <option key={repo.path} value={repo.path}>
-                      {repo.name} ({(repo.languages ?? []).join(', ') || 'unknown'})
-                    </option>
-                  ))}
-                </select>
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setSelectedRepos(new Set(availableRepos.map(r => r.path)))}
+                  >
+                    Select All
+                  </button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setSelectedRepos(new Set())}>
+                    Clear
+                  </button>
+                </div>
+                <div style={{ maxHeight: '300px', overflow: 'auto', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '8px' }}>
+                  {availableRepos.length === 0 && (
+                    <div style={{ fontSize: '13px', color: 'var(--text-secondary)', padding: '8px' }}>
+                      No git repositories available in your current code directory.
+                    </div>
+                  )}
+                  {availableRepos.map(repo => {
+                    const checked = selectedRepos.has(repo.path)
+                    return (
+                      <label key={repo.path} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 6px', borderRadius: '8px', background: checked ? 'var(--accent-light)' : 'transparent', cursor: 'pointer' }}>
+                        <input type="checkbox" checked={checked} onChange={() => toggleSelectedRepo(repo.path)} />
+                        <span style={{ display: 'flex', flexDirection: 'column' }}>
+                          <span style={{ fontSize: '13px', fontWeight: 500 }}>{repo.name}</span>
+                          <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{repo.path}</span>
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+                <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                  Selected repositories: {selectedRepos.size}
+                </div>
               </div>
 
               <div>
-                <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                  Frequency
+                <label style={{ display: 'block', marginBottom: '8px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  Repeat
                 </label>
-                <div style={{ display: 'flex', gap: '8px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '8px', marginBottom: '12px' }}>
                   {(['hourly', 'daily', 'weekly', 'monthly'] as ScheduleFrequency[]).map(freq => (
                     <button
                       key={freq}
                       className={`btn ${frequency === freq ? 'btn-primary' : 'btn-secondary'} btn-sm`}
                       onClick={() => setFrequency(freq)}
-                      style={{ flex: 1 }}
                     >
                       {FREQUENCY_LABELS[freq]}
                     </button>
                   ))}
                 </div>
-              </div>
 
-              <div style={{ display: 'flex', gap: '24px' }}>
-                <label className="checkbox-wrapper">
-                  <div
-                    className={`checkbox ${createPR ? 'checked' : ''}`}
-                    onClick={() => setCreatePR(!createPR)}
-                  >
-                    {createPR && (
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
-                        <polyline points="20 6 9 17 4 12" />
-                      </svg>
-                    )}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>Start date</label>
+                    <input type="date" className="input" value={startDate} onChange={e => setStartDate(e.target.value)} />
                   </div>
-                  <span className="checkbox-label">Create PR</span>
-                </label>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>Time</label>
+                    <input type="time" className="input" value={timeOfDay} onChange={e => setTimeOfDay(e.target.value)} />
+                  </div>
+                </div>
 
-                <label className="checkbox-wrapper">
-                  <div
-                    className={`checkbox ${runTests ? 'checked' : ''}`}
-                    onClick={() => setRunTests(!runTests)}
-                  >
-                    {runTests && (
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
-                        <polyline points="20 6 9 17 4 12" />
-                      </svg>
-                    )}
+                {frequency === 'hourly' && (
+                  <div style={{ marginBottom: '10px' }}>
+                    <label style={{ display: 'block', marginBottom: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                      Repeat every (hours)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={24}
+                      className="input"
+                      value={intervalHours}
+                      onChange={e => setIntervalHours(Math.max(1, Math.min(24, Number(e.target.value) || 1)))}
+                    />
                   </div>
-                  <span className="checkbox-label">Run tests</span>
-                </label>
+                )}
+
+                {frequency === 'weekly' && (
+                  <div style={{ marginBottom: '10px' }}>
+                    <label style={{ display: 'block', marginBottom: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                      Repeat on
+                    </label>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: '6px' }}>
+                      {WEEKDAY_OPTIONS.map(day => {
+                        const selected = weeklyDays.has(day.value)
+                        return (
+                          <button
+                            key={day.value}
+                            className={`btn ${selected ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                            onClick={() => toggleWeeklyDay(day.value)}
+                            title={day.long}
+                          >
+                            {day.short}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {frequency === 'monthly' && (
+                  <div style={{ marginBottom: '10px' }}>
+                    <label style={{ display: 'block', marginBottom: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                      Day of month
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={31}
+                      className="input"
+                      value={monthlyDay}
+                      onChange={e => setMonthlyDay(Math.max(1, Math.min(31, Number(e.target.value) || 1)))}
+                    />
+                  </div>
+                )}
+
+                <div className="alert" style={{ fontSize: '12px', marginTop: '4px' }}>
+                  <div style={{ marginBottom: '4px', color: 'var(--text-secondary)' }}>Summary</div>
+                  <div>{recurrenceSummary}</div>
+                </div>
+
+                <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                  Scheduled updates always run tests before and after dependency changes.
+                </div>
               </div>
             </div>
 
             <div style={{ display: 'flex', gap: '8px', marginTop: '24px', justifyContent: 'flex-end' }}>
-              <button className="btn btn-secondary" onClick={() => setShowAddModal(false)}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => {
+                  setShowAddModal(false)
+                  resetForm()
+                }}
+              >
                 Cancel
               </button>
               <button
                 className="btn btn-primary"
                 onClick={addJob}
-                disabled={!selectedRepo}
+                disabled={selectedRepos.size === 0}
               >
-                Add Schedule
+                Create {selectedRepos.size || ''} Schedule{selectedRepos.size === 1 ? '' : 's'}
               </button>
             </div>
           </div>

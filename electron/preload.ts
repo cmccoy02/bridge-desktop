@@ -75,6 +75,7 @@ export interface NonBreakingUpdateConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
   prTitle?: string
@@ -106,6 +107,11 @@ export interface SecurityPatchResult {
   prUrl?: string | null
   error?: string
   testsPassed?: boolean
+}
+
+export interface PushBranchResult {
+  success: boolean
+  error?: string
 }
 
 export interface LargeFile {
@@ -141,6 +147,11 @@ export interface ScheduledJob {
   repoPath: string
   repoName: string
   frequency: ScheduleFrequency
+  intervalHours: number
+  daysOfWeek: number[]
+  dayOfMonth: number
+  timeOfDay: string
+  startAt: string
   enabled: boolean
   lastRun: string | null
   nextRun: string
@@ -148,6 +159,21 @@ export interface ScheduledJob {
   createPR: boolean
   runTests: boolean
   createdAt: string
+}
+
+export interface ScheduledJobCreateInput {
+  repoPath: string
+  repoName: string
+  frequency: ScheduleFrequency
+  intervalHours?: number
+  daysOfWeek?: number[]
+  dayOfMonth?: number
+  timeOfDay?: string
+  startAt?: string
+  enabled: boolean
+  language: string
+  createPR: boolean
+  runTests: boolean
 }
 
 export interface SmartScanSchedule {
@@ -397,6 +423,9 @@ contextBridge.exposeInMainWorld('bridge', {
   runSecurityPatch: (config: SecurityPatchConfig): Promise<SecurityPatchResult> =>
     ipcRenderer.invoke('run-security-patch', config),
 
+  pushBranch: (repoPath: string, branchName: string): Promise<PushBranchResult> =>
+    ipcRenderer.invoke('push-branch', repoPath, branchName),
+
   onPatchBatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => {
     ipcRenderer.on('patch-batch-progress', (_, progress) => callback(progress))
     return () => ipcRenderer.removeAllListeners('patch-batch-progress')
@@ -439,8 +468,11 @@ contextBridge.exposeInMainWorld('bridge', {
   getScheduledJobs: (): Promise<ScheduledJob[]> =>
     ipcRenderer.invoke('get-scheduled-jobs'),
 
-  addScheduledJob: (job: Omit<ScheduledJob, 'id' | 'createdAt' | 'lastRun' | 'nextRun'>): Promise<ScheduledJob> =>
+  addScheduledJob: (job: ScheduledJobCreateInput): Promise<ScheduledJob> =>
     ipcRenderer.invoke('add-scheduled-job', job),
+
+  addScheduledJobsBatch: (jobs: ScheduledJobCreateInput[]): Promise<ScheduledJob[]> =>
+    ipcRenderer.invoke('add-scheduled-jobs-batch', jobs),
 
   updateScheduledJob: (jobId: string, updates: Partial<ScheduledJob>): Promise<ScheduledJob | null> =>
     ipcRenderer.invoke('update-scheduled-job', jobId, updates),
@@ -534,6 +566,7 @@ declare global {
       runPatchBatch: (config: PatchBatchConfig) => Promise<PatchBatchResult>
       runNonBreakingUpdate: (config: NonBreakingUpdateConfig) => Promise<PatchBatchResult>
       runSecurityPatch: (config: SecurityPatchConfig) => Promise<SecurityPatchResult>
+      pushBranch: (repoPath: string, branchName: string) => Promise<PushBranchResult>
       onPatchBatchProgress: (callback: (progress: { message: string; step: number; total: number }) => void) => () => void
       onPatchBatchWarning: (callback: (warning: { message: string; output: string }) => void) => () => void
       onPatchBatchLog: (callback: (entry: { message: string }) => void) => () => void
@@ -544,7 +577,8 @@ declare global {
       predictMergeConflicts: (repoPath: string) => Promise<ConflictWarning[]>
       getGitHubCliStatus: (repoPath: string) => Promise<GitHubCliStatus>
       getScheduledJobs: () => Promise<ScheduledJob[]>
-      addScheduledJob: (job: Omit<ScheduledJob, 'id' | 'createdAt' | 'lastRun' | 'nextRun'>) => Promise<ScheduledJob>
+      addScheduledJob: (job: ScheduledJobCreateInput) => Promise<ScheduledJob>
+      addScheduledJobsBatch: (jobs: ScheduledJobCreateInput[]) => Promise<ScheduledJob[]>
       updateScheduledJob: (jobId: string, updates: Partial<ScheduledJob>) => Promise<ScheduledJob | null>
       deleteScheduledJob: (jobId: string) => Promise<boolean>
       getJobResults: (jobId?: string) => Promise<JobResult[]>

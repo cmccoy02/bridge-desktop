@@ -11,11 +11,9 @@ export default function PatchBatch() {
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<{ message: string; step: number; total: number } | null>(null)
   const [result, setResult] = useState<PatchBatchResult | null>(null)
-  const [activeRunType, setActiveRunType] = useState<'non-breaking' | 'major' | null>(null)
 
   const [branchName, setBranchName] = useState('bridge-update-deps')
-  const [createPR, setCreatePR] = useState(false)
-  const [runTests, setRunTests] = useState(true)
+  const runTests = true
   const [repoInfo, setRepoInfo] = useState<{ branch: string; isProtectedBranch: boolean } | null>(null)
   const [conflictWarnings, setConflictWarnings] = useState<ConflictWarning[]>([])
   const [outputLines, setOutputLines] = useState<string[]>([])
@@ -28,6 +26,8 @@ export default function PatchBatch() {
   const [securityProgress, setSecurityProgress] = useState<{ message: string; step: number; total: number } | null>(null)
   const [securityResult, setSecurityResult] = useState<SecurityPatchResult | null>(null)
   const [securityLogs, setSecurityLogs] = useState<string[]>([])
+  const [pushingBranch, setPushingBranch] = useState(false)
+  const [pushMessage, setPushMessage] = useState<string | null>(null)
 
   const getPackageKey = (pkg: OutdatedPackage) => `${pkg.language}:${pkg.name}`
 
@@ -39,6 +39,23 @@ export default function PatchBatch() {
     () => packages.filter(pkg => pkg.updateType === 'major'),
     [packages]
   )
+  const sortedPackages = useMemo(() => {
+    const order: Record<OutdatedPackage['updateType'], number> = {
+      patch: 0,
+      minor: 1,
+      major: 2,
+      unknown: 3
+    }
+    return [...packages].sort((a, b) => {
+      const aAuto = a.isNonBreaking ? 0 : 1
+      const bAuto = b.isNonBreaking ? 0 : 1
+      if (aAuto !== bAuto) return aAuto - bAuto
+      if (order[a.updateType] !== order[b.updateType]) {
+        return order[a.updateType] - order[b.updateType]
+      }
+      return a.name.localeCompare(b.name)
+    })
+  }, [packages])
 
   const getUpdateTypeBadgeClass = (updateType: OutdatedPackage['updateType']) => {
     switch (updateType) {
@@ -167,10 +184,7 @@ export default function PatchBatch() {
       const outdated = await window.bridge.getOutdatedPackages(selectedRepo.path)
       setPackages(outdated)
 
-      const defaultMajorSelection = outdated
-        .filter(pkg => pkg.updateType === 'major')
-        .map(getPackageKey)
-      setSelectedMajorPackages(new Set(defaultMajorSelection))
+      setSelectedMajorPackages(new Set())
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load outdated packages'
       setLoadError(message)
@@ -193,7 +207,7 @@ export default function PatchBatch() {
     setSelectedMajorPackages(next)
   }
 
-  const runNonBreakingUpdates = async () => {
+  const runSelectedUpdates = async () => {
     if (!selectedRepo) return
 
     if (!selectedRepo.hasGit) {
@@ -201,22 +215,11 @@ export default function PatchBatch() {
       return
     }
 
-    if (nonBreakingPackages.length === 0) {
-      setResult({ success: false, error: 'No non-breaking updates available.' })
+    if (nonBreakingPackages.length === 0 && selectedMajorPackages.size === 0) {
+      setResult({ success: false, error: 'No dependency updates selected.' })
       return
     }
 
-    const isJavascriptRepo = (selectedRepo.languages ?? []).includes('javascript')
-    if (runTests && isJavascriptRepo && testCommand.trim().length === 0) {
-      setResult({
-        success: false,
-        error: "No test script found - add one to package.json or uncheck 'Run tests'.",
-        testsPassed: false
-      })
-      return
-    }
-
-    setActiveRunType('non-breaking')
     setRunning(true)
     setProgress(null)
     setResult(null)
@@ -226,8 +229,11 @@ export default function PatchBatch() {
       const nextResult = await window.bridge.runNonBreakingUpdate({
         repoPath: selectedRepo.path,
         branchName: `${branchName}-non-breaking-${Date.now()}`,
-        createPR,
+        createPR: false,
         runTests,
+        selectedMajorPackages: majorPackages
+          .filter(pkg => selectedMajorPackages.has(getPackageKey(pkg)))
+          .map(pkg => pkg.name),
         testCommand: testCommand.trim() || undefined,
         prTitle: 'chore(deps): apply non-breaking dependency updates',
         prBody: 'Automated patch/minor dependency updates via Bridge.'
@@ -248,69 +254,6 @@ export default function PatchBatch() {
     } finally {
       setRunning(false)
       setProgress(null)
-      setActiveRunType(null)
-    }
-  }
-
-  const runMajorUpdates = async () => {
-    if (!selectedRepo) return
-
-    if (!selectedRepo.hasGit) {
-      setResult({ success: false, error: "Git not initialized - run 'git init' first." })
-      return
-    }
-
-    const selected = majorPackages.filter(pkg => selectedMajorPackages.has(getPackageKey(pkg)))
-    if (selected.length === 0) {
-      setResult({ success: false, error: 'Select at least one major update package.' })
-      return
-    }
-
-    const isJavascriptRepo = (selectedRepo.languages ?? []).includes('javascript')
-    if (runTests && isJavascriptRepo && testCommand.trim().length === 0) {
-      setResult({
-        success: false,
-        error: "No test script found - add one to package.json or uncheck 'Run tests'.",
-        testsPassed: false
-      })
-      return
-    }
-
-    setActiveRunType('major')
-    setRunning(true)
-    setProgress(null)
-    setResult(null)
-    setOutputLines([])
-
-    try {
-      const nextResult = await window.bridge.runPatchBatch({
-        repoPath: selectedRepo.path,
-        branchName: `${branchName}-major-${Date.now()}`,
-        packages: selected.map(pkg => ({ name: pkg.name, language: pkg.language })),
-        createPR,
-        runTests,
-        updateStrategy: 'latest',
-        testCommand: testCommand.trim() || undefined,
-        prTitle: `chore(deps): update ${selected.length} major dependency versions`,
-        prBody: `## Summary\nMajor dependency upgrades via Bridge.\n\n### Updated packages\n${selected.map(pkg => `- ${pkg.name}`).join('\n')}`
-      })
-
-      setResult(nextResult)
-
-      if (nextResult.success) {
-        await loadOutdatedPackages({ preserveResult: true })
-        await loadRepoInfo()
-        await loadMergeConflictWarnings()
-      }
-    } catch (error) {
-      setResult({
-        success: false,
-        error: error instanceof Error ? error.message : 'Major update failed'
-      })
-    } finally {
-      setRunning(false)
-      setProgress(null)
-      setActiveRunType(null)
     }
   }
 
@@ -326,7 +269,7 @@ export default function PatchBatch() {
       const nextResult = await window.bridge.runSecurityPatch({
         repoPath: selectedRepo.path,
         branchName: `bridge-security-patch-${Date.now()}`,
-        createPR,
+        createPR: false,
         runTests,
         testCommand: testCommand.trim() || undefined
       })
@@ -379,6 +322,31 @@ export default function PatchBatch() {
   }
 
   const isJavascriptRepo = (selectedRepo.languages ?? []).includes('javascript')
+  const canPushResultBranch = Boolean(result?.success && result?.branchName && !result?.prUrl)
+
+  const pushResultBranch = async () => {
+    if (!selectedRepo || !result?.branchName || pushingBranch) return
+
+    setPushingBranch(true)
+    setPushMessage(null)
+    try {
+      const response = await window.bridge.pushBranch(selectedRepo.path, result.branchName)
+      if (response.success) {
+        setPushMessage(`Branch '${result.branchName}' pushed successfully.`)
+        setOutputLines(prev => [...prev, `✓ Pushed ${result.branchName} to origin`])
+      } else {
+        const message = response.error || 'Failed to push branch'
+        setPushMessage(message)
+        setOutputLines(prev => [...prev, `✗ ${message}`])
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to push branch'
+      setPushMessage(message)
+      setOutputLines(prev => [...prev, `✗ ${message}`])
+    } finally {
+      setPushingBranch(false)
+    }
+  }
 
   return (
     <div className="fade-in">
@@ -435,86 +403,20 @@ export default function PatchBatch() {
 
         <div className="card" style={{ marginBottom: '16px' }}>
           <div className="card-header">
-            <h3 className="card-title">Non-Breaking Updates (Patch + Minor)</h3>
+            <h3 className="card-title">All Outdated Dependencies</h3>
             <button
               className="btn btn-primary btn-sm"
-              onClick={() => void runNonBreakingUpdates()}
-              disabled={running || nonBreakingPackages.length === 0 || !selectedRepo.hasGit}
+              onClick={() => void runSelectedUpdates()}
+              disabled={running || (!selectedRepo.hasGit) || (nonBreakingPackages.length === 0 && selectedMajorPackages.size === 0)}
             >
-              {running && activeRunType === 'non-breaking' ? 'Running...' : `Update ${nonBreakingPackages.length} Packages`}
+              {running
+                ? 'Running...'
+                : `Update Patch/Minor + ${selectedMajorPackages.size} Major`}
             </button>
           </div>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
-            Runs the clean install/update sequence Marcus recommended, from inside the project context.
+          <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '10px' }}>
+            Patch/minor updates are selected automatically. Check major versions if you want to include them.
           </p>
-        </div>
-
-        <div className="card" style={{ marginBottom: '16px' }}>
-          <div className="card-header">
-            <h3 className="card-title">Major Updates (Manual Selection)</h3>
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => void runMajorUpdates()}
-              disabled={running || selectedMajorPackages.size === 0 || !selectedRepo.hasGit}
-            >
-              {running && activeRunType === 'major' ? 'Running...' : `Update ${selectedMajorPackages.size} Major Packages`}
-            </button>
-          </div>
-          {majorPackages.length === 0 ? (
-            <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>No major updates available.</div>
-          ) : (
-            <div className="package-table-wrapper">
-              <table className="package-table">
-                <thead>
-                  <tr>
-                    <th />
-                    <th>Package Name</th>
-                    <th>Current</th>
-                    <th>Latest</th>
-                    <th>Type</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {majorPackages.map(pkg => {
-                    const key = getPackageKey(pkg)
-                    const isSelected = selectedMajorPackages.has(key)
-                    return (
-                      <tr
-                        key={key}
-                        className={isSelected ? 'selected' : ''}
-                        onClick={() => toggleMajorPackage(pkg)}
-                      >
-                        <td>
-                          <div className={`checkbox ${isSelected ? 'checked' : ''}`}>
-                            {isSelected && (
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
-                                <polyline points="20 6 9 17 4 12" />
-                              </svg>
-                            )}
-                          </div>
-                        </td>
-                        <td>
-                          <div className="package-name-cell">
-                            <div className="package-name">{pkg.name}</div>
-                            <span className="badge badge-warning">major</span>
-                          </div>
-                        </td>
-                        <td>{pkg.current}</td>
-                        <td className="version-new">{pkg.latest}</td>
-                        <td>{pkg.type === 'devDependencies' ? 'devDep' : 'dep'}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div className="card" style={{ marginBottom: '16px' }}>
-          <div className="card-header">
-            <h3 className="card-title">All Outdated Dependencies</h3>
-          </div>
           {packages.length === 0 ? (
             <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
               No outdated dependencies detected.
@@ -524,6 +426,7 @@ export default function PatchBatch() {
               <table className="package-table">
                 <thead>
                   <tr>
+                    <th />
                     <th>Package Name</th>
                     <th>Current</th>
                     <th>Wanted</th>
@@ -533,10 +436,30 @@ export default function PatchBatch() {
                   </tr>
                 </thead>
                 <tbody>
-                  {packages.map(pkg => {
+                  {sortedPackages.map(pkg => {
                     const key = getPackageKey(pkg)
+                    const isMajor = pkg.updateType === 'major'
+                    const isChecked = pkg.isNonBreaking || selectedMajorPackages.has(key)
+                    const isDisabled = !isMajor
                     return (
-                      <tr key={`all-${key}`}>
+                      <tr
+                        key={`all-${key}`}
+                        className={isChecked ? 'selected' : ''}
+                        onClick={() => {
+                          if (isMajor) {
+                            toggleMajorPackage(pkg)
+                          }
+                        }}
+                      >
+                        <td>
+                          <div className={`checkbox ${isChecked ? 'checked' : ''}`} style={isDisabled ? { opacity: 0.6 } : undefined}>
+                            {isChecked && (
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                            )}
+                          </div>
+                        </td>
                         <td>
                           <div className="package-name-cell">
                             <div className="package-name">{pkg.name}</div>
@@ -603,11 +526,23 @@ export default function PatchBatch() {
             {result.success ? (
               <div>
                 <div style={{ fontWeight: 600, marginBottom: '8px', color: 'var(--success)' }}>
-                  {result.prUrl ? 'PR created successfully.' : `Updates committed to branch '${result.branchName}'.`}
+                  {result.prUrl ? 'PR created successfully.' : `Changes committed locally on '${result.branchName}' and ready to push.`}
                 </div>
                 {result.prUrl && (
                   <div style={{ fontSize: '13px' }}>
                     PR: <a href={result.prUrl} target="_blank" rel="noopener noreferrer">{result.prUrl}</a>
+                  </div>
+                )}
+                {canPushResultBranch && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
+                    <button className="btn btn-secondary btn-sm" onClick={() => void pushResultBranch()} disabled={pushingBranch}>
+                      {pushingBranch ? 'Pushing...' : 'Push Branch'}
+                    </button>
+                    {pushMessage && (
+                      <span style={{ fontSize: '12px', color: pushMessage.includes('successfully') ? 'var(--success)' : 'var(--error)' }}>
+                        {pushMessage}
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
@@ -655,28 +590,8 @@ export default function PatchBatch() {
             />
           </div>
 
-          <div className="config-grid">
-            <label className="checkbox-wrapper">
-              <div className={`checkbox ${createPR ? 'checked' : ''}`} onClick={() => setCreatePR(!createPR)}>
-                {createPR && (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                )}
-              </div>
-              <span className="checkbox-label">Create pull request (off by default)</span>
-            </label>
-
-            <label className="checkbox-wrapper">
-              <div className={`checkbox ${runTests ? 'checked' : ''}`} onClick={() => setRunTests(!runTests)}>
-                {runTests && (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3">
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                )}
-              </div>
-              <span className="checkbox-label">Run tests before creating PR</span>
-            </label>
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+            Tests are always required before and after updates.
           </div>
 
           <div>
@@ -694,7 +609,6 @@ export default function PatchBatch() {
                 }
               }}
               placeholder="npm test"
-              disabled={!runTests}
             />
             {runTests && testCommandDetected && (
               <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-tertiary)' }}>

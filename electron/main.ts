@@ -6,8 +6,6 @@ import {
   scanForRepos,
   readDirectory,
   readFile,
-  validateRepositories,
-  cleanupMissingRepositories,
   getDefaultCodeDirectory,
   directoryExists
 } from './services/fileSystem'
@@ -40,6 +38,7 @@ import {
 import {
   getScheduledJobs,
   addScheduledJob,
+  addScheduledJobsBatch,
   updateScheduledJob,
   deleteScheduledJob,
   getJobResults,
@@ -47,7 +46,6 @@ import {
   initializeScheduler,
   cleanupScheduler,
   setSchedulerExecutor,
-  ScheduledJob,
   JobResult
 } from './services/scheduler'
 import {
@@ -63,7 +61,8 @@ import {
   getRepoInfo,
   isOnProtectedBranch,
   predictMergeConflicts,
-  getGitHubCliStatus
+  getGitHubCliStatus,
+  pushBranch
 } from './services/git'
 import {
   runSecurityScan,
@@ -75,6 +74,7 @@ import {
   saveAppSettings,
   isExperimentalFeaturesEnabled
 } from './services/appSettings'
+
 const store = createBridgeStore('bridge-main')
 const CODE_DIRECTORY_KEY = 'bridge-code-directory'
 
@@ -96,20 +96,17 @@ function createWindow() {
     }
   })
 
-  // Vite dev server URL - check multiple possible env vars
-  const devServerUrl = process.env.VITE_DEV_SERVER_URL ||
-                       process.env['VITE_DEV_SERVER_URL'] ||
-                       (process.env.NODE_ENV !== 'production' ? 'http://localhost:5173' : null)
+  const devServerUrl = app.isPackaged
+    ? null
+    : (process.env.VITE_DEV_SERVER_URL || process.env['VITE_DEV_SERVER_URL'] || 'http://localhost:5173')
 
   if (devServerUrl) {
     console.log('Loading dev server:', devServerUrl)
     mainWindow.loadURL(devServerUrl)
     mainWindow.webContents.openDevTools()
 
-    // Handle load failures
-    mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDesc) => {
+    mainWindow.webContents.on('did-fail-load', (_, errorCode, errorDesc) => {
       console.error('Failed to load:', errorCode, errorDesc)
-      // Retry after a short delay
       setTimeout(() => {
         mainWindow?.loadURL(devServerUrl)
       }, 1000)
@@ -123,6 +120,7 @@ app.whenReady().then(() => {
   createWindow()
   initializeScheduler()
   initializeSmartScheduler()
+
   setSchedulerExecutor(async (job): Promise<JobResult | null> => {
     try {
       const outdated = await collectOutdatedPackages(job.repoPath)
@@ -140,10 +138,10 @@ app.whenReady().then(() => {
       const result = await runNonBreakingUpdatePipeline({
         repoPath: job.repoPath,
         branchName: `bridge-scheduled-${Date.now()}`,
-        createPR: job.createPR,
-        runTests: job.runTests,
-        prTitle: `chore(deps): scheduled non-breaking dependency update`,
-        prBody: `## Summary\nScheduled non-breaking updates (patch + minor) via Bridge.`
+        createPR: false,
+        runTests: true,
+        prTitle: 'chore(deps): scheduled non-breaking dependency update',
+        prBody: '## Summary\nScheduled non-breaking updates (patch + minor) via Bridge.'
       })
 
       return {
@@ -173,12 +171,10 @@ app.whenReady().then(() => {
     await runFullScan(repoPath, { skipConsoleUpload: false })
   })
 
-  // Validate repos on startup
-  setTimeout(async () => {
-    const repos = store.get('repositories', []) as any[]
-    const cleaned = await cleanupMissingRepositories(repos)
-    store.set('repositories', cleaned)
-  }, 2000)
+  // Legacy migration: repo lists are no longer persisted.
+  if (store.has('repositories')) {
+    store.delete('repositories')
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -199,8 +195,6 @@ app.on('before-quit', () => {
   cleanupScheduler()
   cleanupSmartScheduler()
 })
-
-// IPC Handlers
 
 // Repository management
 ipcMain.handle('select-directory', async () => {
@@ -251,23 +245,7 @@ ipcMain.handle('select-code-directory', async () => {
 })
 
 ipcMain.handle('scan-for-repos', async (_, directory: string) => {
-  const repos = await scanForRepos(directory)
-  const existing = (store.get('repositories', []) as any[]).filter(Boolean)
-  const byPath = new Map<string, any>()
-
-  for (const repo of existing) {
-    if (repo?.path) {
-      byPath.set(repo.path, repo)
-    }
-  }
-
-  for (const repo of repos) {
-    byPath.set(repo.path, repo)
-  }
-
-  const merged = await validateRepositories(Array.from(byPath.values()))
-  store.set('repositories', merged)
-  return merged
+  return await scanForRepos(directory)
 })
 
 ipcMain.handle('scan-repository', async (_, repoPath: string) => {
@@ -286,29 +264,31 @@ ipcMain.handle('detect-languages', async (_, repoPath: string) => {
   return await detectLanguages(repoPath)
 })
 
-// Persistence
+// Legacy compatibility for renderer APIs that still call these methods.
 ipcMain.handle('get-repositories', async () => {
-  const repos = store.get('repositories', []) as any[]
-  return await validateRepositories(repos)
+  const codeDirectory = (store.get(CODE_DIRECTORY_KEY, '') as string) || ''
+  if (!codeDirectory || !(await directoryExists(codeDirectory))) {
+    return []
+  }
+  return await scanForRepos(codeDirectory)
 })
 
 ipcMain.handle('save-repositories', (_, repositories: any[]) => {
-  store.set('repositories', repositories)
+  void repositories
   return true
 })
 
 ipcMain.handle('remove-repository', (_, repoPath: string) => {
-  const repos = store.get('repositories', []) as any[]
-  const filtered = repos.filter((r: any) => r.path !== repoPath)
-  store.set('repositories', filtered)
-  return filtered
+  void repoPath
+  return []
 })
 
 ipcMain.handle('cleanup-missing-repos', async () => {
-  const repos = store.get('repositories', []) as any[]
-  const cleaned = await cleanupMissingRepositories(repos)
-  store.set('repositories', cleaned)
-  return cleaned
+  const codeDirectory = (store.get(CODE_DIRECTORY_KEY, '') as string) || ''
+  if (!codeDirectory || !(await directoryExists(codeDirectory))) {
+    return []
+  }
+  return await scanForRepos(codeDirectory)
 })
 
 // Bridge Console settings
@@ -469,6 +449,7 @@ ipcMain.handle('run-non-breaking-update', async (event, config: {
   branchName: string
   createPR: boolean
   runTests: boolean
+  selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
   prTitle?: string
@@ -500,6 +481,17 @@ ipcMain.handle('run-security-patch', async (event, config: {
   )
 })
 
+ipcMain.handle('push-branch', async (_, repoPath: string, branchName: string) => {
+  try {
+    await pushBranch(repoPath, branchName)
+    return { success: true }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to push branch'
+    }
+  }
+})
 
 // Git info
 ipcMain.handle('get-repo-info', async (_, repoPath: string) => {
@@ -525,6 +517,10 @@ ipcMain.handle('get-scheduled-jobs', () => {
 
 ipcMain.handle('add-scheduled-job', (_, job: any) => {
   return addScheduledJob(job)
+})
+
+ipcMain.handle('add-scheduled-jobs-batch', (_, jobs: any[]) => {
+  return addScheduledJobsBatch(jobs)
 })
 
 ipcMain.handle('update-scheduled-job', (_, jobId: string, updates: any) => {

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
 import { useScanContext, type ScanTab } from '../../contexts/ScanContext'
 import { useAppSettings } from '../../contexts/AppSettingsContext'
-import type { GitHubCliStatus, View } from '../../types'
+import type { View } from '../../types'
 
 interface DashboardProps {
   onNavigate: (view: View) => void
@@ -26,15 +26,13 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
     repositories,
     selectedRepo,
     codeDirectory,
-    addRepository,
-    removeRepository,
     selectRepository,
     selectAndScanCodeDirectory,
     scanCodeDirectory
   } = useRepositories()
   const { scanResults, requestScan, setPreferredTab } = useScanContext()
   const { settings, saveSettings } = useAppSettings()
-  const [ghStatus, setGhStatus] = useState<GitHubCliStatus | null>(null)
+  const [repoRemote, setRepoRemote] = useState<string | null>(null)
 
   const scanResult = selectedRepo ? scanResults[selectedRepo.path] : null
   const lastScan = scanResult ? formatRelativeTime(scanResult.scanDate) : 'Never'
@@ -50,30 +48,23 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
   }
 
   useEffect(() => {
-    const loadGhStatus = async () => {
+    const loadRepoInfo = async () => {
       if (!selectedRepo?.path) {
-        setGhStatus(null)
+        setRepoRemote(null)
         return
       }
       try {
-        const status = await window.bridge.getGitHubCliStatus(selectedRepo.path)
-        setGhStatus(status)
+        const info = await window.bridge.getRepoInfo(selectedRepo.path)
+        setRepoRemote(info.remote)
       } catch {
-        setGhStatus(null)
+        setRepoRemote(null)
       }
     }
-    void loadGhStatus()
+    void loadRepoInfo()
   }, [selectedRepo?.path])
 
   const handleSelectCodeDirectory = async () => {
     await selectAndScanCodeDirectory()
-  }
-
-  const handleImportSingleRepo = async () => {
-    const repoPath = await window.bridge.selectDirectory()
-    if (repoPath) {
-      await addRepository(repoPath)
-    }
   }
 
   const firstRunReady = Boolean(codeDirectory && repositories.length > 0 && selectedRepo?.hasGit)
@@ -136,13 +127,10 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
             <div className="issue-item">{repositories.length > 0 ? '2. Repositories discovered.' : '2. Scan for repositories.'}</div>
             <div className="issue-item">{selectedRepo?.hasGit ? '3. Git repository selected.' : '3. Select a git repository.'}</div>
             <div className="issue-item">
-              {ghStatus?.installed ? '4. GitHub CLI installed.' : '4. Install GitHub CLI for optional PR creation.'}
+              4. Run `Update Dependencies` (non-breaking) and verify tests pass.
             </div>
             <div className="issue-item">
-              {ghStatus?.authenticated ? '5. GitHub CLI authenticated.' : '5. Run `gh auth login` for optional PR creation.'}
-            </div>
-            <div className="issue-item">
-              6. Go to `Update Dependencies` and run the non-breaking update action.
+              5. Push when ready from the updater output panel.
             </div>
           </div>
         </div>
@@ -226,16 +214,11 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
               {selectedRepo.hasGit ? 'Git repository detected.' : 'Repository is not a git repo.'}
             </div>
             <div className="issue-item">
-              {ghStatus?.installed ? 'GitHub CLI installed.' : 'GitHub CLI not installed.'}
+              {repoRemote ? `Remote detected: ${repoRemote}` : 'No git remote configured.'}
             </div>
             <div className="issue-item">
-              {ghStatus?.authenticated
-                ? `GitHub CLI authenticated${ghStatus.account ? ` (${ghStatus.account})` : ''}.`
-                : 'GitHub CLI not authenticated.'}
+              Branch push uses standard git credentials configured on this machine.
             </div>
-            {ghStatus?.message && (
-              <div className="issue-item">{ghStatus.message}</div>
-            )}
           </div>
         )}
       </div>
@@ -267,23 +250,15 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
               <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
             </svg>
             <h3 className="empty-state-title">No repositories yet</h3>
-            <p className="empty-state-desc">Select a code directory or import a single repository.</p>
+            <p className="empty-state-desc">Select a code directory to discover git repositories.</p>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button className="btn btn-primary" onClick={handleSelectCodeDirectory}>
                 Select Code Directory
-              </button>
-              <button className="btn btn-secondary" onClick={handleImportSingleRepo}>
-                Import Single Repo
               </button>
             </div>
           </div>
         ) : (
           <div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' }}>
-              <button className="btn btn-ghost btn-sm" onClick={handleImportSingleRepo}>
-                Import Single Repo
-              </button>
-            </div>
             <div className="repo-grid">
               {repositories.map(repo => (
                 <div
@@ -295,16 +270,6 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
                     <div className="repo-title">{repo.name}</div>
                     <div className="repo-path">{repo.path}</div>
                   </div>
-                  <button
-                    className="btn btn-ghost btn-icon"
-                    onClick={(e) => { e.stopPropagation(); removeRepository(repo.path) }}
-                    title="Remove repository"
-                  >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </button>
                 </div>
               ))}
             </div>

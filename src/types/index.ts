@@ -73,6 +73,7 @@ export interface NonBreakingUpdateConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
   prTitle?: string
@@ -105,6 +106,11 @@ export interface SecurityPatchResult {
   prUrl?: string | null
   error?: string
   testsPassed?: boolean
+}
+
+export interface PushBranchResult {
+  success: boolean
+  error?: string
 }
 
 export interface LargeFile {
@@ -140,6 +146,11 @@ export interface ScheduledJob {
   repoPath: string
   repoName: string
   frequency: ScheduleFrequency
+  intervalHours: number
+  daysOfWeek: number[]
+  dayOfMonth: number
+  timeOfDay: string
+  startAt: string
   enabled: boolean
   lastRun: string | null
   nextRun: string
@@ -147,6 +158,21 @@ export interface ScheduledJob {
   createPR: boolean
   runTests: boolean
   createdAt: string
+}
+
+export interface ScheduledJobCreateInput {
+  repoPath: string
+  repoName: string
+  frequency: ScheduleFrequency
+  intervalHours?: number
+  daysOfWeek?: number[]
+  dayOfMonth?: number
+  timeOfDay?: string
+  startAt?: string
+  enabled: boolean
+  language: string
+  createPR: boolean
+  runTests: boolean
 }
 
 export interface SmartScanSchedule {
