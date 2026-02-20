@@ -22,6 +22,7 @@ import {
   saveBridgeConsoleSettings,
   testBridgeConsoleConnection
 } from './services/bridgeConsoleApi'
+import { loadBridgeProjectConfig } from './services/bridgeProjectConfig'
 import {
   detectLanguages,
   getPythonOutdated,
@@ -260,6 +261,10 @@ ipcMain.handle('read-file', async (_, filePath: string) => {
   return await readFile(filePath)
 })
 
+ipcMain.handle('get-bridge-project-config', async (_, repoPath: string) => {
+  return await loadBridgeProjectConfig(repoPath)
+})
+
 ipcMain.handle('detect-languages', async (_, repoPath: string) => {
   return await detectLanguages(repoPath)
 })
@@ -404,6 +409,8 @@ ipcMain.handle('run-patch-batch', async (event, config: {
   packages: { name: string; language: Language }[]
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   updateStrategy?: 'wanted' | 'latest'
   testCommand?: string
   testTimeoutMs?: number
@@ -430,6 +437,8 @@ ipcMain.handle('run-patch-batch', async (event, config: {
       packages,
       createPR,
       runTests: shouldRunTests,
+      baseBranch: config.baseBranch,
+      remoteFirst: config.remoteFirst,
       updateStrategy,
       prTitle,
       prBody,
@@ -449,14 +458,29 @@ ipcMain.handle('run-non-breaking-update', async (event, config: {
   branchName: string
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
   prTitle?: string
   prBody?: string
 }) => {
+  const projectConfig = await loadBridgeProjectConfig(config.repoPath)
+  const patchConfig = projectConfig.config.patch || {}
+  const branchPrefix = patchConfig.branchPrefix || projectConfig.config.branchPrefix || 'bridge-update-deps'
+  const branchName = config.branchName?.trim() || `${branchPrefix}-${Date.now()}`
+
   return runNonBreakingUpdatePipeline(
-    config,
+    {
+      ...config,
+      branchName,
+      createPR: config.createPR ?? patchConfig.createPR ?? true,
+      runTests: config.runTests ?? patchConfig.runTests ?? true,
+      testCommand: config.testCommand?.trim() || patchConfig.testCommand,
+      baseBranch: config.baseBranch || patchConfig.baseBranch || projectConfig.config.baseBranch,
+      remoteFirst: config.remoteFirst ?? patchConfig.remoteFirst ?? true
+    },
     {
       onProgress: (message, step, total) => event.sender.send('patch-batch-progress', { message, step, total }),
       onLog: (message) => event.sender.send('patch-batch-log', { message }),
@@ -470,6 +494,8 @@ ipcMain.handle('run-security-patch', async (event, config: {
   branchName: string
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   testCommand?: string
 }) => {
   return runSecurityPatchPipeline(

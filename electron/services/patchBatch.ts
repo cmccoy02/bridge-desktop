@@ -34,6 +34,8 @@ export interface PatchBatchConfig {
   packages: { name: string; language: Language }[]
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   updateStrategy?: 'wanted' | 'latest'
   testCommand?: string
   testTimeoutMs?: number
@@ -46,6 +48,8 @@ export interface NonBreakingUpdateConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
@@ -75,6 +79,8 @@ export interface SecurityPatchConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   testCommand?: string
 }
 
@@ -434,9 +440,89 @@ async function runValidationSteps(
   }
 }
 
-async function createIsolatedWorkspace(repoPath: string, branchName: string): Promise<string> {
+function sanitizeGitRef(value: string): string | null {
+  const normalized = value.trim()
+  if (!normalized) return null
+  if (!/^[A-Za-z0-9._/-]+$/.test(normalized)) {
+    return null
+  }
+  return normalized
+}
+
+async function gitRefExists(repoPath: string, ref: string): Promise<boolean> {
+  const safeRef = sanitizeGitRef(ref)
+  if (!safeRef) return false
+  try {
+    await execAsync(`git rev-parse --verify --quiet "${safeRef}"`, {
+      cwd: repoPath,
+      timeout: 30000
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function resolveBaseRef(
+  repoPath: string,
+  preferredBaseBranch?: string,
+  onLog?: (message: string) => void
+): Promise<string> {
+  try {
+    await execAsync('git fetch origin --prune', {
+      cwd: repoPath,
+      timeout: 120000,
+      maxBuffer: DEFAULT_MAX_BUFFER
+    })
+  } catch (error) {
+    onLog?.(`WARN: Unable to fetch origin before update. Falling back to local refs (${formatError(error, 'fetch failed')}).`)
+  }
+
+  const candidates: string[] = []
+  const preferred = sanitizeGitRef(preferredBaseBranch || '')
+  if (preferred) {
+    candidates.push(`origin/${preferred}`, preferred)
+  }
+
+  try {
+    const { stdout } = await execAsync('git symbolic-ref --short refs/remotes/origin/HEAD', {
+      cwd: repoPath,
+      timeout: 30000
+    })
+    const originHead = stdout.trim()
+    if (originHead) {
+      candidates.push(originHead)
+      if (originHead.startsWith('origin/')) {
+        candidates.push(originHead.slice('origin/'.length))
+      }
+    }
+  } catch {}
+
+  candidates.push('origin/main', 'origin/master', 'main', 'master')
+  const uniqueCandidates = Array.from(new Set(candidates.map(candidate => candidate.trim()).filter(Boolean)))
+
+  for (const candidate of uniqueCandidates) {
+    if (await gitRefExists(repoPath, candidate)) {
+      return candidate
+    }
+  }
+
+  return 'HEAD'
+}
+
+async function createIsolatedWorkspace(
+  repoPath: string,
+  branchName: string,
+  options: { baseBranch?: string; remoteFirst?: boolean; onLog?: (message: string) => void } = {}
+): Promise<string> {
   const worktreeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-worktree-'))
-  await execAsync(`git worktree add -b ${branchName} "${worktreeRoot}" HEAD`, {
+  const useRemoteFirst = options.remoteFirst !== false
+  const baseRef = useRemoteFirst
+    ? await resolveBaseRef(repoPath, options.baseBranch, options.onLog)
+    : 'HEAD'
+  options.onLog?.(`Creating branch '${branchName}' from ${baseRef}.`)
+
+  await execAsync(`git worktree add -b "${branchName}" "${worktreeRoot}" "${baseRef}"`, {
     cwd: repoPath,
     timeout: DEFAULT_TEST_TIMEOUT_MS,
     maxBuffer: DEFAULT_MAX_BUFFER
@@ -623,6 +709,8 @@ export async function runPatchBatchPipeline(
     packages,
     createPR,
     runTests: shouldRunTests,
+    baseBranch,
+    remoteFirst,
     updateStrategy,
     prTitle,
     prBody,
@@ -689,7 +777,11 @@ export async function runPatchBatchPipeline(
 
   try {
     onProgress('Preparing isolated update workspace...', ++currentStep, totalSteps)
-    workspacePath = await createIsolatedWorkspace(repoPath, safeBranchName)
+    workspacePath = await createIsolatedWorkspace(repoPath, safeBranchName, {
+      baseBranch,
+      remoteFirst,
+      onLog
+    })
     workspaceCreated = true
     onLog(`Using isolated workspace: ${workspacePath}`)
     onLog('Local repository changes are left untouched.')
@@ -866,6 +958,7 @@ export async function runPatchBatchPipeline(
     }
 
     onLog(`✓ PR created: ${prUrl}`)
+    deleteBranchOnCleanup = true
 
     return {
       success: true,
@@ -905,6 +998,8 @@ export async function runNonBreakingUpdatePipeline(
     branchName,
     createPR,
     runTests: shouldRunTests,
+    baseBranch,
+    remoteFirst,
     selectedMajorPackages = [],
     testCommand,
     testTimeoutMs,
@@ -986,7 +1081,11 @@ export async function runNonBreakingUpdatePipeline(
     }
 
     onProgress('Preparing isolated update workspace...', ++currentStep, totalSteps)
-    workspacePath = await createIsolatedWorkspace(repoPath, safeBranchName)
+    workspacePath = await createIsolatedWorkspace(repoPath, safeBranchName, {
+      baseBranch,
+      remoteFirst,
+      onLog
+    })
     workspaceCreated = true
     onLog(`Using isolated workspace: ${workspacePath}`)
     onLog('Local repository changes are left untouched.')
@@ -1115,6 +1214,7 @@ export async function runNonBreakingUpdatePipeline(
         ...(updatedPackages.length ? updatedPackages.map(pkg => `- ${pkg}`) : ['- lockfile/package graph changes'])
       ].join('\n')
     )
+    deleteBranchOnCleanup = true
 
     return {
       success: true,
@@ -1205,7 +1305,7 @@ export async function runSecurityPatchPipeline(
   config: SecurityPatchConfig,
   handlers: SecurityPatchHandlers = {}
 ): Promise<SecurityPatchResult> {
-  const { repoPath, branchName, createPR, runTests: shouldRunTests, testCommand } = config
+  const { repoPath, branchName, createPR, runTests: shouldRunTests, baseBranch, remoteFirst, testCommand } = config
   const safeBranchName = normalizeBranchName(branchName)
   const onProgress = handlers.onProgress || (() => {})
   const onLog = handlers.onLog || (() => {})
@@ -1222,7 +1322,11 @@ export async function runSecurityPatchPipeline(
   }
 
   try {
-    workspacePath = await createIsolatedWorkspace(repoPath, safeBranchName)
+    workspacePath = await createIsolatedWorkspace(repoPath, safeBranchName, {
+      baseBranch,
+      remoteFirst,
+      onLog
+    })
     workspaceCreated = true
     onLog(`Using isolated workspace: ${workspacePath}`)
 
@@ -1286,6 +1390,7 @@ export async function runSecurityPatchPipeline(
         `chore(security): patch ${updatedPackages.length} vulnerable packages`,
         `## Summary\\nBridge patched ${updatedPackages.length} vulnerable packages.\\n\\n### Updated packages\\n${updatedPackages.map(pkg => `- ${pkg}`).join('\\n')}`
       )
+      deleteBranchOnCleanup = true
     }
 
     if (updatedPackages.length === 0) {

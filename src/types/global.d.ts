@@ -25,7 +25,8 @@ import type {
   BridgeConsoleSettings,
   ConflictWarning,
   AppSettings,
-  GitHubCliStatus
+  GitHubCliStatus,
+  BridgeProjectConfigResult
 } from './index'
 
 declare global {
@@ -41,6 +42,7 @@ declare global {
       scanRepository: (path: string) => Promise<Repository>
       readDirectory: (path: string) => Promise<FileEntry[]>
       readFile: (path: string) => Promise<string>
+      getBridgeProjectConfig: (repoPath: string) => Promise<BridgeProjectConfigResult>
       detectLanguages: (path: string) => Promise<Language[]>
       getRepositories: () => Promise<Repository[]>
       saveRepositories: (repos: Repository[]) => Promise<boolean>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { ConflictWarning, OutdatedPackage, PatchBatchResult, SecurityPatchResult } from '../../types'
+import type { BridgeProjectConfigResult, ConflictWarning, OutdatedPackage, PatchBatchResult, SecurityPatchResult } from '../../types'
 import Scheduler from '../Scheduler/Scheduler'
 
 export default function PatchBatch() {
@@ -11,9 +11,9 @@ export default function PatchBatch() {
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<{ message: string; step: number; total: number } | null>(null)
   const [result, setResult] = useState<PatchBatchResult | null>(null)
+  const [projectConfig, setProjectConfig] = useState<BridgeProjectConfigResult | null>(null)
 
   const [branchName, setBranchName] = useState('bridge-update-deps')
-  const runTests = true
   const [repoInfo, setRepoInfo] = useState<{ branch: string; isProtectedBranch: boolean } | null>(null)
   const [conflictWarnings, setConflictWarnings] = useState<ConflictWarning[]>([])
   const [outputLines, setOutputLines] = useState<string[]>([])
@@ -28,6 +28,13 @@ export default function PatchBatch() {
   const [securityLogs, setSecurityLogs] = useState<string[]>([])
   const [pushingBranch, setPushingBranch] = useState(false)
   const [pushMessage, setPushMessage] = useState<string | null>(null)
+
+  const patchConfig = projectConfig?.config.patch
+  const createPrOnRun = patchConfig?.createPR ?? true
+  const runTestsOnRun = patchConfig?.runTests ?? true
+  const configuredBaseBranch = patchConfig?.baseBranch || projectConfig?.config.baseBranch
+  const remoteFirst = patchConfig?.remoteFirst ?? true
+  const runTests = runTestsOnRun
 
   const getPackageKey = (pkg: OutdatedPackage) => `${pkg.language}:${pkg.name}`
 
@@ -72,6 +79,7 @@ export default function PatchBatch() {
 
   useEffect(() => {
     if (selectedRepo) {
+      void loadProjectConfig()
       void loadOutdatedPackages()
       void loadRepoInfo()
       void detectTestCommand()
@@ -112,8 +120,37 @@ export default function PatchBatch() {
     }
   }
 
+  const loadProjectConfig = async () => {
+    if (!selectedRepo) return
+    try {
+      const config = await window.bridge.getBridgeProjectConfig(selectedRepo.path)
+      setProjectConfig(config)
+      const configuredBranchPrefix = config.config.patch?.branchPrefix || config.config.branchPrefix
+      if (configuredBranchPrefix) {
+        setBranchName(configuredBranchPrefix)
+      }
+      const configuredTestCommand = config.config.patch?.testCommand
+      if (configuredTestCommand) {
+        setTestCommand(configuredTestCommand)
+        setTestCommandDetected(false)
+      }
+    } catch {
+      setProjectConfig(null)
+    }
+  }
+
   const detectTestCommand = async () => {
     if (!selectedRepo) return
+    try {
+      const config = await window.bridge.getBridgeProjectConfig(selectedRepo.path)
+      const configuredCommand = config.config.patch?.testCommand
+      if (configuredCommand) {
+        setTestCommand(configuredCommand)
+        setTestCommandDetected(false)
+        return
+      }
+    } catch {}
+
     const primaryLang = selectedRepo.languages?.[0] || 'javascript'
     const defaultTestCommands: Record<string, string> = {
       python: 'pytest',
@@ -229,8 +266,10 @@ export default function PatchBatch() {
       const nextResult = await window.bridge.runNonBreakingUpdate({
         repoPath: selectedRepo.path,
         branchName: `${branchName}-non-breaking-${Date.now()}`,
-        createPR: false,
-        runTests,
+        createPR: createPrOnRun,
+        runTests: runTestsOnRun,
+        baseBranch: configuredBaseBranch,
+        remoteFirst,
         selectedMajorPackages: majorPackages
           .filter(pkg => selectedMajorPackages.has(getPackageKey(pkg)))
           .map(pkg => pkg.name),
@@ -271,6 +310,8 @@ export default function PatchBatch() {
         branchName: `bridge-security-patch-${Date.now()}`,
         createPR: false,
         runTests,
+        baseBranch: configuredBaseBranch,
+        remoteFirst,
         testCommand: testCommand.trim() || undefined
       })
 
@@ -355,7 +396,7 @@ export default function PatchBatch() {
           <div>
             <h2 style={{ marginBottom: '4px' }}>Update Dependencies</h2>
             <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
-              Non-breaking updates are automated. Major updates require explicit package selection.
+              One click runs updates from remote source-of-truth, validates, and {createPrOnRun ? 'opens a PR' : 'creates a local commit'}.
             </p>
           </div>
           <button className="btn btn-secondary btn-sm" onClick={() => void loadOutdatedPackages()} disabled={loading}>
@@ -401,6 +442,22 @@ export default function PatchBatch() {
           </div>
         )}
 
+        {projectConfig?.exists && (
+          <div className="card" style={{ marginBottom: '16px', borderColor: 'var(--accent)' }}>
+            <div style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+              Using config: <code>{projectConfig.path}</code>
+            </div>
+            <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+              Base branch: {configuredBaseBranch || 'origin HEAD'} · Remote-first: {remoteFirst ? 'enabled' : 'disabled'} · Mode: {createPrOnRun ? 'Auto PR' : 'Local commit'}
+            </div>
+            {projectConfig.errors.length > 0 && (
+              <div style={{ marginTop: '6px', color: 'var(--warning)', fontSize: '12px' }}>
+                Config warning: {projectConfig.errors.join('; ')}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="card" style={{ marginBottom: '16px' }}>
           <div className="card-header">
             <h3 className="card-title">All Outdated Dependencies</h3>
@@ -411,7 +468,9 @@ export default function PatchBatch() {
             >
               {running
                 ? 'Running...'
-                : `Update Patch/Minor + ${selectedMajorPackages.size} Major`}
+                : createPrOnRun
+                  ? `One Click Update + PR (${selectedMajorPackages.size} Major Selected)`
+                  : `Update Patch/Minor + ${selectedMajorPackages.size} Major`}
             </button>
           </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '10px' }}>
@@ -591,7 +650,7 @@ export default function PatchBatch() {
           </div>
 
           <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-            Tests are always required before and after updates.
+            {runTests ? 'Tests run before and after updates.' : 'Tests are disabled via .bridge.json for this repo.'}
           </div>
 
           <div>
@@ -617,7 +676,7 @@ export default function PatchBatch() {
             )}
             {runTests && isJavascriptRepo && !testCommandDetected && (
               <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--warning)' }}>
-                No test script found - add one to package.json or uncheck 'Run tests'.
+                No root test script found. Bridge will still attempt workspace validation scripts.
               </div>
             )}
           </div>

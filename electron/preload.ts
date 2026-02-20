@@ -63,6 +63,8 @@ export interface PatchBatchConfig {
   packages: { name: string; language: Language }[]
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   updateStrategy?: 'wanted' | 'latest'
   testCommand?: string
   testTimeoutMs?: number
@@ -75,6 +77,8 @@ export interface NonBreakingUpdateConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
@@ -97,7 +101,31 @@ export interface SecurityPatchConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   testCommand?: string
+}
+
+export interface BridgePatchConfig {
+  createPR?: boolean
+  runTests?: boolean
+  testCommand?: string
+  branchPrefix?: string
+  baseBranch?: string
+  remoteFirst?: boolean
+}
+
+export interface BridgeProjectConfig {
+  baseBranch?: string
+  branchPrefix?: string
+  patch?: BridgePatchConfig
+}
+
+export interface BridgeProjectConfigResult {
+  exists: boolean
+  path: string
+  config: BridgeProjectConfig
+  errors: string[]
 }
 
 export interface SecurityPatchResult {
@@ -370,6 +398,9 @@ contextBridge.exposeInMainWorld('bridge', {
   readFile: (path: string): Promise<string> =>
     ipcRenderer.invoke('read-file', path),
 
+  getBridgeProjectConfig: (repoPath: string): Promise<BridgeProjectConfigResult> =>
+    ipcRenderer.invoke('get-bridge-project-config', repoPath),
+
   detectLanguages: (path: string): Promise<Language[]> =>
     ipcRenderer.invoke('detect-languages', path),
 
@@ -550,6 +581,7 @@ declare global {
       scanRepository: (path: string) => Promise<Repository>
       readDirectory: (path: string) => Promise<FileEntry[]>
       readFile: (path: string) => Promise<string>
+      getBridgeProjectConfig: (repoPath: string) => Promise<BridgeProjectConfigResult>
       detectLanguages: (path: string) => Promise<Language[]>
       getRepositories: () => Promise<Repository[]>
       saveRepositories: (repos: Repository[]) => Promise<boolean>

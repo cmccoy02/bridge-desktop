@@ -61,6 +61,8 @@ export interface PatchBatchConfig {
   packages: { name: string; language: Language }[]
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   updateStrategy?: 'wanted' | 'latest'
   testCommand?: string
   testTimeoutMs?: number
@@ -73,6 +75,8 @@ export interface NonBreakingUpdateConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
@@ -96,7 +100,31 @@ export interface SecurityPatchConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  baseBranch?: string
+  remoteFirst?: boolean
   testCommand?: string
+}
+
+export interface BridgePatchConfig {
+  createPR?: boolean
+  runTests?: boolean
+  testCommand?: string
+  branchPrefix?: string
+  baseBranch?: string
+  remoteFirst?: boolean
+}
+
+export interface BridgeProjectConfig {
+  baseBranch?: string
+  branchPrefix?: string
+  patch?: BridgePatchConfig
+}
+
+export interface BridgeProjectConfigResult {
+  exists: boolean
+  path: string
+  config: BridgeProjectConfig
+  errors: string[]
 }
 
 export interface SecurityPatchResult {

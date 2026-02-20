@@ -55,3 +55,6 @@ venv/
 
 # Local sandbox repo (not committed)
 sandbox/
+
+# Local learning notes
+LEARN.md
