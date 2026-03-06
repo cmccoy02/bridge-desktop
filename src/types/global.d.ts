@@ -23,7 +23,6 @@ import type {
   DeadCodeReport,
   DeadCodeExport,
   BridgeConsoleSettings,
-  ConflictWarning,
   AppSettings,
   GitHubCliStatus,
   BridgeProjectConfigResult,
@@ -73,7 +72,6 @@ declare global {
       onSecurityPatchLog: (callback: (entry: { message: string }) => void) => () => void
       getRepoInfo: (repoPath: string) => Promise<RepoInfo>
       checkProtectedBranch: (repoPath: string) => Promise<boolean>
-      predictMergeConflicts: (repoPath: string) => Promise<ConflictWarning[]>
       getGitHubCliStatus: (repoPath: string) => Promise<GitHubCliStatus>
       getScheduledJobs: () => Promise<ScheduledJob[]>
       addScheduledJob: (job: ScheduledJobCreateInput) => Promise<ScheduledJob>

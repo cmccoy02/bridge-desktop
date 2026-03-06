@@ -3,10 +3,8 @@ import Sidebar from './components/Layout/Sidebar'
 import Header from './components/Layout/Header'
 import PatchBatch from './components/PatchBatch/PatchBatch'
 import Dashboard from './components/Dashboard/Dashboard'
-import Cleanup from './components/Cleanup/Cleanup'
 import Scheduler from './components/Scheduler/Scheduler'
 import Security from './components/Security/Security'
-import FileBrowser from './components/FileBrowser/FileBrowser'
 import FullScan from './components/FullScan/FullScan'
 import Settings from './components/Settings/Settings'
 import { useAppSettings } from './contexts/AppSettingsContext'
@@ -26,14 +24,10 @@ export default function App() {
         return <Dashboard onNavigate={setCurrentView} />
       case 'full-scan':
         return <FullScan />
-      case 'cleanup':
-        return <Cleanup />
       case 'scheduler':
         return <Scheduler />
       case 'security':
         return <Security />
-      case 'files':
-        return <FileBrowser />
       case 'settings':
         return <Settings />
       case 'patch-batch':

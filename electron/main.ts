@@ -65,7 +65,6 @@ import {
 import {
   getRepoInfo,
   isOnProtectedBranch,
-  predictMergeConflicts,
   getGitHubCliStatus,
   pushBranch
 } from './services/git'
@@ -517,8 +516,10 @@ ipcMain.handle('run-non-breaking-update', async (event, config: {
   branchName: string
   createPR: boolean
   runTests: boolean
+  pushChanges?: boolean
   baseBranch?: string
   remoteFirst?: boolean
+  selectedReviewPackages?: string[]
   selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
@@ -530,19 +531,12 @@ ipcMain.handle('run-non-breaking-update', async (event, config: {
   const patchConfig = projectConfig.config.patch || {}
   const branchPrefix = patchConfig.branchPrefix || projectConfig.config.branchPrefix || 'bridge-update-deps'
   const branchName = config.branchName?.trim() || `${branchPrefix}-${Date.now()}`
-  const updatePolicy = bridgeConfig.dependencies.updatePolicy
-  const pinnedPackages = bridgeConfig.dependencies.pinnedPackages || {}
-  const selectedMajor = updatePolicy.major === 'ignore'
-    ? []
-    : (config.selectedMajorPackages || []).filter(pkg => !pinnedPackages[pkg])
-  const skippedPinned = (config.selectedMajorPackages || []).filter(pkg => Boolean(pinnedPackages[pkg]))
-
-  if (skippedPinned.length > 0) {
-    event.sender.send('patch-batch-warning', {
-      message: `Skipped pinned major packages from .bridge.json: ${Array.from(new Set(skippedPinned)).join(', ')}`,
-      output: ''
-    })
-  }
+  const selectedReviewPackages = Array.from(
+    new Set([
+      ...(config.selectedReviewPackages || []),
+      ...(config.selectedMajorPackages || [])
+    ])
+  )
 
   return runNonBreakingUpdatePipeline(
     {
@@ -550,7 +544,7 @@ ipcMain.handle('run-non-breaking-update', async (event, config: {
       branchName,
       createPR: config.createPR ?? patchConfig.createPR ?? false,
       runTests: config.runTests ?? patchConfig.runTests ?? bridgeConfig.gates.tests.required,
-      selectedMajorPackages: selectedMajor,
+      selectedReviewPackages,
       testCommand: config.testCommand?.trim() || bridgeConfig.gates.tests.command || patchConfig.testCommand,
       testTimeoutMs: config.testTimeoutMs ?? bridgeConfig.gates.tests.timeout,
       baseBranch: config.baseBranch || patchConfig.baseBranch || projectConfig.config.baseBranch,
@@ -611,10 +605,6 @@ ipcMain.handle('get-repo-info', async (_, repoPath: string) => {
 
 ipcMain.handle('check-protected-branch', async (_, repoPath: string) => {
   return await isOnProtectedBranch(repoPath)
-})
-
-ipcMain.handle('predict-merge-conflicts', async (_, repoPath: string) => {
-  return await predictMergeConflicts(repoPath)
 })
 
 ipcMain.handle('get-github-cli-status', async (_, repoPath: string) => {

@@ -93,15 +93,6 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
             </svg>
             Update Dependencies
           </button>
-          <button
-            className={`nav-item ${currentView === 'cleanup' ? 'active' : ''}`}
-            onClick={() => onNavigate('cleanup')}
-          >
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-            </svg>
-            Cleanup
-          </button>
           {settings.experimentalFeatures && (
             <button
               className={`nav-item ${currentView === 'security' ? 'active' : ''}`}
@@ -122,15 +113,6 @@ export default function Sidebar({ currentView, onNavigate }: SidebarProps) {
               <polyline points="12 6 12 12 16 14" />
             </svg>
             Scheduler
-          </button>
-          <button
-            className={`nav-item ${currentView === 'files' ? 'active' : ''}`}
-            onClick={() => onNavigate('files')}
-          >
-            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
-            </svg>
-            File Browser
           </button>
           <button
             className={`nav-item ${currentView === 'settings' ? 'active' : ''}`}

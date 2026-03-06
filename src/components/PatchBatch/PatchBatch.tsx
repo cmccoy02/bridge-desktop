@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { BridgeConfig, BridgeProjectConfigResult, ConflictWarning, OutdatedPackage, PatchBatchResult, SecurityPatchResult } from '../../types'
+import type { BridgeConfig, BridgeProjectConfigResult, OutdatedPackage, PatchBatchResult } from '../../types'
 import Scheduler from '../Scheduler/Scheduler'
 
 export default function PatchBatch() {
   const { selectedRepo } = useRepositories()
   const [packages, setPackages] = useState<OutdatedPackage[]>([])
-  const [selectedMajorPackages, setSelectedMajorPackages] = useState<Set<string>>(new Set())
+  const [selectedReviewPackages, setSelectedReviewPackages] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<{ message: string; step: number; total: number } | null>(null)
@@ -16,20 +16,12 @@ export default function PatchBatch() {
 
   const [branchName, setBranchName] = useState('bridge-update-deps')
   const [repoInfo, setRepoInfo] = useState<{ branch: string; isProtectedBranch: boolean } | null>(null)
-  const [conflictWarnings, setConflictWarnings] = useState<ConflictWarning[]>([])
   const [outputLines, setOutputLines] = useState<string[]>([])
   const [testCommand, setTestCommand] = useState('')
   const [testCommandDetected, setTestCommandDetected] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [showScheduler, setShowScheduler] = useState(false)
   const [createPrEnabled, setCreatePrEnabled] = useState(false)
-
-  const [securityRunning, setSecurityRunning] = useState(false)
-  const [securityProgress, setSecurityProgress] = useState<{ message: string; step: number; total: number } | null>(null)
-  const [securityResult, setSecurityResult] = useState<SecurityPatchResult | null>(null)
-  const [securityLogs, setSecurityLogs] = useState<string[]>([])
-  const [pushingBranch, setPushingBranch] = useState(false)
-  const [pushMessage, setPushMessage] = useState<string | null>(null)
   const [dependencyDebtDelta, setDependencyDebtDelta] = useState<{ before: number; after: number; delta: number } | null>(null)
 
   const patchConfig = projectConfig?.config.patch
@@ -73,6 +65,7 @@ export default function PatchBatch() {
       return a.name.localeCompare(b.name)
     })
   }, [packages])
+  const selectedPackageCount = nonBreakingPackages.length + selectedReviewPackages.size
 
   const getUpdateTypeBadgeClass = (updateType: OutdatedPackage['updateType']) => {
     switch (updateType) {
@@ -93,7 +86,6 @@ export default function PatchBatch() {
       void loadOutdatedPackages()
       void loadRepoInfo()
       void detectTestCommand()
-      void loadMergeConflictWarnings()
     }
   }, [selectedRepo])
 
@@ -106,17 +98,11 @@ export default function PatchBatch() {
       const lines = output ? output.split(/\r?\n/).filter(line => line.trim()) : []
       setOutputLines(prev => [...prev, `WARN: ${message}`, ...lines])
     })
-    const cleanupSecurityProgress = window.bridge.onSecurityPatchProgress(setSecurityProgress)
-    const cleanupSecurityLog = window.bridge.onSecurityPatchLog(({ message }) => {
-      setSecurityLogs(prev => [...prev, message])
-    })
 
     return () => {
       cleanupProgress()
       cleanupLog()
       cleanupWarning()
-      cleanupSecurityProgress()
-      cleanupSecurityLog()
     }
   }, [])
 
@@ -195,7 +181,9 @@ export default function PatchBatch() {
 
       const fileNames = new Set(files.map(file => file.name))
       let packageManager = 'npm'
-      if (fileNames.has('pnpm-lock.yaml')) {
+      if (fileNames.has('package-lock.json')) {
+        packageManager = 'npm'
+      } else if (fileNames.has('pnpm-lock.yaml')) {
         packageManager = 'pnpm'
       } else if (fileNames.has('yarn.lock')) {
         packageManager = 'yarn'
@@ -211,20 +199,6 @@ export default function PatchBatch() {
         setTestCommand('')
         setTestCommandDetected(false)
       }
-    }
-  }
-
-  const loadMergeConflictWarnings = async () => {
-    if (!selectedRepo || !selectedRepo.hasGit) {
-      setConflictWarnings([])
-      return
-    }
-
-    try {
-      const warnings = await window.bridge.predictMergeConflicts(selectedRepo.path)
-      setConflictWarnings(warnings)
-    } catch {
-      setConflictWarnings([])
     }
   }
 
@@ -255,32 +229,31 @@ export default function PatchBatch() {
       setPackages(filtered)
 
       const autoSelectedMajors = filtered
-        .filter(pkg => pkg.updateType === 'major')
-        .filter(pkg => (pkg.vulnerabilities?.critical || 0) > 0 || (pkg.vulnerabilities?.high || 0) > 0)
+        .filter(pkg => !pkg.isNonBreaking && ((pkg.vulnerabilities?.critical || 0) > 0 || (pkg.vulnerabilities?.high || 0) > 0))
         .map(getPackageKey)
-      setSelectedMajorPackages(new Set(autoSelectedMajors))
+      setSelectedReviewPackages(new Set(autoSelectedMajors))
       return filtered
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load outdated packages'
       setLoadError(message)
       setPackages([])
-      setSelectedMajorPackages(new Set())
+      setSelectedReviewPackages(new Set())
       return null
     } finally {
       setLoading(false)
     }
   }
 
-  const toggleMajorPackage = (pkg: OutdatedPackage) => {
-    if (pkg.updateType !== 'major') return
+  const toggleReviewPackage = (pkg: OutdatedPackage) => {
+    if (pkg.isNonBreaking) return
     const key = getPackageKey(pkg)
-    const next = new Set(selectedMajorPackages)
+    const next = new Set(selectedReviewPackages)
     if (next.has(key)) {
       next.delete(key)
     } else {
       next.add(key)
     }
-    setSelectedMajorPackages(next)
+    setSelectedReviewPackages(next)
   }
 
   const runSelectedUpdates = async () => {
@@ -291,7 +264,7 @@ export default function PatchBatch() {
       return
     }
 
-    if (nonBreakingPackages.length === 0 && selectedMajorPackages.size === 0) {
+    if (nonBreakingPackages.length === 0 && selectedReviewPackages.size === 0) {
       setResult({ success: false, error: 'No dependency updates selected.' })
       return
     }
@@ -322,8 +295,8 @@ export default function PatchBatch() {
         runTests: runTestsOnRun,
         baseBranch: configuredBaseBranch,
         remoteFirst,
-        selectedMajorPackages: majorPackages
-          .filter(pkg => selectedMajorPackages.has(getPackageKey(pkg)))
+        selectedReviewPackages: packages
+          .filter(pkg => selectedReviewPackages.has(getPackageKey(pkg)))
           .map(pkg => pkg.name),
         testCommand: testCommand.trim() || undefined,
         prTitle: 'chore(deps): apply non-breaking dependency updates',
@@ -335,7 +308,6 @@ export default function PatchBatch() {
       if (nextResult.success) {
         const refreshedPackages = await loadOutdatedPackages({ preserveResult: true })
         await loadRepoInfo()
-        await loadMergeConflictWarnings()
         if (refreshedPackages) {
           const afterDependencyDebt = estimateDependencyDebt(refreshedPackages)
           setDependencyDebtDelta({
@@ -353,45 +325,6 @@ export default function PatchBatch() {
     } finally {
       setRunning(false)
       setProgress(null)
-    }
-  }
-
-  const runSecurityPatch = async () => {
-    if (!selectedRepo) return
-
-    setSecurityRunning(true)
-    setSecurityProgress(null)
-    setSecurityResult(null)
-    setSecurityLogs([])
-
-    try {
-      const nextResult = await window.bridge.runSecurityPatch({
-        repoPath: selectedRepo.path,
-        branchName: `bridge-security-patch-${Date.now()}`,
-        createPR: false,
-        runTests,
-        baseBranch: configuredBaseBranch,
-        remoteFirst,
-        testCommand: testCommand.trim() || undefined
-      })
-
-      setSecurityResult(nextResult)
-
-      if (nextResult.success) {
-        await loadOutdatedPackages({ preserveResult: true })
-        await loadRepoInfo()
-        await loadMergeConflictWarnings()
-      }
-    } catch (error) {
-      setSecurityResult({
-        success: false,
-        updatedPackages: [],
-        failedPackages: [],
-        error: error instanceof Error ? error.message : 'Security patch failed'
-      })
-    } finally {
-      setSecurityRunning(false)
-      setSecurityProgress(null)
     }
   }
 
@@ -423,32 +356,6 @@ export default function PatchBatch() {
   }
 
   const isJavascriptRepo = (selectedRepo.languages ?? []).includes('javascript')
-  const canPushResultBranch = Boolean(result?.success && result?.branchName && !result?.prUrl && !result?.branchPushed)
-
-  const pushResultBranch = async () => {
-    if (!selectedRepo || !result?.branchName || pushingBranch) return
-
-    setPushingBranch(true)
-    setPushMessage(null)
-    try {
-      const response = await window.bridge.pushBranch(selectedRepo.path, result.branchName)
-      if (response.success) {
-        setPushMessage(`Branch '${result.branchName}' pushed successfully.`)
-        setOutputLines(prev => [...prev, `✓ Pushed ${result.branchName} to origin`])
-      } else {
-        const message = response.error || 'Failed to push branch'
-        setPushMessage(message)
-        setOutputLines(prev => [...prev, `✗ ${message}`])
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to push branch'
-      setPushMessage(message)
-      setOutputLines(prev => [...prev, `✗ ${message}`])
-    } finally {
-      setPushingBranch(false)
-    }
-  }
-
   return (
     <div className="fade-in">
       <div style={{ marginBottom: '24px' }}>
@@ -479,22 +386,6 @@ export default function PatchBatch() {
             </div>
           </div>
         )}
-
-        {conflictWarnings.map((warning, index) => (
-          <div
-            key={`${warning.message}-${index}`}
-            className="card"
-            style={{
-              marginBottom: '16px',
-              borderColor: warning.severity === 'high' ? 'var(--error)' : 'var(--warning)',
-              background: warning.severity === 'high' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(245, 158, 11, 0.1)'
-            }}
-          >
-            <div style={{ fontWeight: 600, marginBottom: '8px' }}>Merge conflict risk</div>
-            <div style={{ marginBottom: '8px' }}>{warning.message}</div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{warning.recommendation}</div>
-          </div>
-        ))}
 
         {loadError && (
           <div className="card" style={{ marginBottom: '16px', borderColor: 'var(--error)', background: 'rgba(239, 68, 68, 0.1)' }}>
@@ -529,18 +420,23 @@ export default function PatchBatch() {
             <button
               className="btn btn-primary btn-sm"
               onClick={() => void runSelectedUpdates()}
-              disabled={running || (!selectedRepo.hasGit) || (nonBreakingPackages.length === 0 && selectedMajorPackages.size === 0)}
+              disabled={running || (!selectedRepo.hasGit) || (nonBreakingPackages.length === 0 && selectedReviewPackages.size === 0)}
             >
               {running
                 ? 'Running...'
                 : createPrEnabled
-                  ? `One Click Update + PR (${selectedMajorPackages.size} Major Selected)`
-                  : `Update/Test/Commit/Push (${selectedMajorPackages.size} Major Selected)`}
+                  ? `Update Patch/Minor [${selectedPackageCount}] + PR`
+                  : `Update Patch/Minor [${selectedPackageCount}]`}
             </button>
           </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '10px' }}>
-            Patch/minor updates follow `.bridge.json` policy. Major updates remain manual, except packages with critical/high vulnerabilities.
+            Runs: pull latest → tests → clean install/update script → tests → commit → push.
           </p>
+          {nonBreakingPackages.length === 0 && majorPackages.length > 0 && (
+            <div style={{ color: 'var(--warning)', fontSize: '12px', marginBottom: '10px' }}>
+              No patch/minor updates are available in this repo right now. Only major upgrades are available, so select them manually if you want to include them.
+            </div>
+          )}
           {packages.length === 0 ? (
             <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
               No outdated dependencies detected.
@@ -563,16 +459,15 @@ export default function PatchBatch() {
                 <tbody>
                   {sortedPackages.map(pkg => {
                     const key = getPackageKey(pkg)
-                    const isMajor = pkg.updateType === 'major'
-                    const isChecked = pkg.isNonBreaking || selectedMajorPackages.has(key)
-                    const isDisabled = !isMajor
+                    const isChecked = pkg.isNonBreaking || selectedReviewPackages.has(key)
+                    const isDisabled = pkg.isNonBreaking
                     return (
                       <tr
                         key={`all-${key}`}
                         className={isChecked ? 'selected' : ''}
                         onClick={() => {
-                          if (isMajor) {
-                            toggleMajorPackage(pkg)
+                          if (!isDisabled) {
+                            toggleReviewPackage(pkg)
                           }
                         }}
                       >
@@ -617,37 +512,6 @@ export default function PatchBatch() {
           )}
         </div>
 
-        <div className="card" style={{ marginBottom: '16px' }}>
-          <div className="card-header">
-            <h3 className="card-title">Security Vulnerability Auto-Patcher</h3>
-            <button className="btn btn-primary btn-sm" onClick={() => void runSecurityPatch()} disabled={securityRunning || !selectedRepo.hasGit}>
-              {securityRunning ? 'Patching...' : 'Patch High/Critical'}
-            </button>
-          </div>
-          {securityProgress && (
-            <div style={{ marginBottom: '12px' }}>
-              <div style={{ fontSize: '13px', marginBottom: '6px' }}>{securityProgress.message}</div>
-              <div className="progress-bar">
-                <div className="progress-fill" style={{ width: `${(securityProgress.step / securityProgress.total) * 100}%` }} />
-              </div>
-            </div>
-          )}
-          {securityResult && (
-            <div className="card" style={{
-              borderColor: securityResult.success ? 'var(--success)' : 'var(--error)',
-              background: securityResult.success ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)',
-              padding: '12px'
-            }}>
-              {securityResult.success ? 'Security patch run succeeded.' : securityResult.error || 'Security patch failed.'}
-            </div>
-          )}
-          {securityLogs.length > 0 && (
-            <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
-              {securityLogs.slice(-4).map((line, i) => <div key={`${line}-${i}`}>{line}</div>)}
-            </div>
-          )}
-        </div>
-
         {result && (
           <div
             className="card"
@@ -677,18 +541,6 @@ export default function PatchBatch() {
                     <strong style={{ color: dependencyDebtDelta.delta <= 0 ? 'var(--success)' : 'var(--error)' }}>
                       ({dependencyDebtDelta.delta >= 0 ? '+' : ''}{dependencyDebtDelta.delta})
                     </strong>
-                  </div>
-                )}
-                {canPushResultBranch && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
-                    <button className="btn btn-secondary btn-sm" onClick={() => void pushResultBranch()} disabled={pushingBranch}>
-                      {pushingBranch ? 'Pushing...' : 'Push Branch'}
-                    </button>
-                    {pushMessage && (
-                      <span style={{ fontSize: '12px', color: pushMessage.includes('successfully') ? 'var(--success)' : 'var(--error)' }}>
-                        {pushMessage}
-                      </span>
-                    )}
                   </div>
                 )}
               </div>

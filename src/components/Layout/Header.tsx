@@ -10,10 +10,8 @@ const viewTitles: Partial<Record<View, string>> = {
   dashboard: 'Dashboard',
   'patch-batch': 'Update Dependencies',
   'full-scan': 'Full TD Scan',
-  cleanup: 'Cleanup',
   scheduler: 'Scheduler',
   security: 'Security Scanner',
-  files: 'File Browser',
   settings: 'Settings'
 }
 

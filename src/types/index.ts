@@ -47,14 +47,6 @@ export interface RepoInfo {
   behind: number
 }
 
-export interface ConflictWarning {
-  severity: 'high' | 'medium'
-  message: string
-  recommendation: string
-  conflictingFiles: string[]
-  behindBy: number
-}
-
 export interface GitHubCliStatus {
   installed: boolean
   authenticated: boolean
@@ -82,10 +74,11 @@ export interface NonBreakingUpdateConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  pushChanges?: boolean
   baseBranch?: string
   remoteFirst?: boolean
   pinnedPackages?: Record<string, string>
-  selectedMajorPackages?: string[]
+  selectedReviewPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
   prTitle?: string
@@ -634,4 +627,4 @@ export interface AppSettings {
   onboardingCompleted: boolean
 }
 
-export type View = 'dashboard' | 'files' | 'patch-batch' | 'cleanup' | 'scheduler' | 'security' | 'full-scan' | 'settings'
+export type View = 'dashboard' | 'patch-batch' | 'scheduler' | 'security' | 'full-scan' | 'settings'

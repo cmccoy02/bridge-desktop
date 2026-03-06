@@ -49,14 +49,6 @@ export interface RepoInfo {
   behind: number
 }
 
-export interface ConflictWarning {
-  severity: 'high' | 'medium'
-  message: string
-  recommendation: string
-  conflictingFiles: string[]
-  behindBy: number
-}
-
 export interface GitHubCliStatus {
   installed: boolean
   authenticated: boolean
@@ -84,10 +76,11 @@ export interface NonBreakingUpdateConfig {
   branchName: string
   createPR: boolean
   runTests: boolean
+  pushChanges?: boolean
   baseBranch?: string
   remoteFirst?: boolean
   pinnedPackages?: Record<string, string>
-  selectedMajorPackages?: string[]
+  selectedReviewPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
   prTitle?: string
@@ -771,9 +764,6 @@ contextBridge.exposeInMainWorld('bridge', {
   checkProtectedBranch: (repoPath: string): Promise<boolean> =>
     ipcRenderer.invoke('check-protected-branch', repoPath),
 
-  predictMergeConflicts: (repoPath: string): Promise<ConflictWarning[]> =>
-    ipcRenderer.invoke('predict-merge-conflicts', repoPath),
-
   getGitHubCliStatus: (repoPath: string): Promise<GitHubCliStatus> =>
     ipcRenderer.invoke('get-github-cli-status', repoPath),
 
@@ -892,7 +882,6 @@ declare global {
       onSecurityPatchLog: (callback: (entry: { message: string }) => void) => () => void
       getRepoInfo: (repoPath: string) => Promise<RepoInfo>
       checkProtectedBranch: (repoPath: string) => Promise<boolean>
-      predictMergeConflicts: (repoPath: string) => Promise<ConflictWarning[]>
       getGitHubCliStatus: (repoPath: string) => Promise<GitHubCliStatus>
       getScheduledJobs: () => Promise<ScheduledJob[]>
       addScheduledJob: (job: ScheduledJobCreateInput) => Promise<ScheduledJob>

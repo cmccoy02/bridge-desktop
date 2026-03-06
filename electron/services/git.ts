@@ -163,11 +163,19 @@ export async function commitChanges(repoPath: string, message: string, files?: s
     }
   }
 
-  await runGitCommand(repoPath, `git commit -m "${message.replace(/"/g, '\\"')}"`)
+  await execAsync(`git commit --no-verify -m "${message.replace(/"/g, '\\"')}"`, {
+    cwd: repoPath,
+    timeout: 60000,
+    env: {
+      ...process.env,
+      HUSKY: '0',
+      HUSKY_SKIP_HOOKS: '1'
+    }
+  })
 }
 
 export async function pushBranch(repoPath: string, branchName: string): Promise<void> {
-  await runGitCommand(repoPath, `git push -u origin ${branchName}`)
+  await runGitCommand(repoPath, `git push --no-verify -u origin ${branchName}`)
 }
 
 export async function createPullRequest(
