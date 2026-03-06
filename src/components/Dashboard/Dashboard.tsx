@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
 import { useScanContext, type ScanTab } from '../../contexts/ScanContext'
 import { useAppSettings } from '../../contexts/AppSettingsContext'
-import type { View } from '../../types'
+import type { ActionItem, BridgeProjectConfigResult, TechDebtScore, View } from '../../types'
 
 interface DashboardProps {
   onNavigate: (view: View) => void
@@ -21,6 +21,21 @@ const formatRelativeTime = (iso?: string | null) => {
   return `${days}d ago`
 }
 
+const gradeColorMap: Record<TechDebtScore['grade'], string> = {
+  A: '#22c55e',
+  B: '#14b8a6',
+  C: '#f59e0b',
+  D: '#f97316',
+  F: '#ef4444'
+}
+
+const trendMeta: Record<TechDebtScore['trend'], { arrow: string; label: string; color: string }> = {
+  improving: { arrow: '↓', label: 'improving', color: 'var(--success)' },
+  stable: { arrow: '→', label: 'stable', color: 'var(--text-secondary)' },
+  declining: { arrow: '↑', label: 'declining', color: 'var(--error)' },
+  unknown: { arrow: '•', label: 'unknown', color: 'var(--text-tertiary)' }
+}
+
 export default function Dashboard({ onNavigate }: DashboardProps) {
   const {
     repositories,
@@ -33,11 +48,14 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
   const { scanResults, requestScan, setPreferredTab } = useScanContext()
   const { settings, saveSettings } = useAppSettings()
   const [repoRemote, setRepoRemote] = useState<string | null>(null)
+  const [projectConfig, setProjectConfig] = useState<BridgeProjectConfigResult | null>(null)
+  const [initializingConfig, setInitializingConfig] = useState(false)
 
   const scanResult = selectedRepo ? scanResults[selectedRepo.path] : null
   const lastScan = scanResult ? formatRelativeTime(scanResult.scanDate) : 'Never'
-  const tdScore = scanResult?.consoleUpload?.tdScore
-  const tdDelta = scanResult?.consoleUpload?.tdDelta
+  const debtScore = scanResult?.techDebtScore
+  const grade = debtScore?.grade
+  const trend = debtScore?.trend || 'unknown'
 
   const navigateToScan = (tab: ScanTab, autoRun = false) => {
     setPreferredTab(tab)
@@ -51,13 +69,19 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
     const loadRepoInfo = async () => {
       if (!selectedRepo?.path) {
         setRepoRemote(null)
+        setProjectConfig(null)
         return
       }
       try {
-        const info = await window.bridge.getRepoInfo(selectedRepo.path)
+        const [info, config] = await Promise.all([
+          window.bridge.getRepoInfo(selectedRepo.path),
+          window.bridge.getBridgeProjectConfig(selectedRepo.path)
+        ])
         setRepoRemote(info.remote)
+        setProjectConfig(config)
       } catch {
         setRepoRemote(null)
+        setProjectConfig(null)
       }
     }
     void loadRepoInfo()
@@ -67,10 +91,40 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
     await selectAndScanCodeDirectory()
   }
 
+  const initializeBridgeConfig = async () => {
+    if (!selectedRepo) return
+    setInitializingConfig(true)
+    try {
+      await window.bridge.generateBridgeConfig(selectedRepo.path)
+      const config = await window.bridge.getBridgeProjectConfig(selectedRepo.path)
+      setProjectConfig(config)
+    } finally {
+      setInitializingConfig(false)
+    }
+  }
+
   const firstRunReady = Boolean(codeDirectory && repositories.length > 0 && selectedRepo?.hasGit)
 
   const completeOnboarding = async () => {
     await saveSettings({ onboardingCompleted: true })
+  }
+
+  const dimensionBars = useMemo(() => {
+    if (!debtScore) return []
+    return Object.entries(debtScore.dimensions).map(([name, dimension]) => ({
+      name,
+      score: dimension.score,
+      weighted: dimension.weightedScore
+    }))
+  }, [debtScore])
+
+  const handleActionFix = (item: ActionItem) => {
+    if (item.dimension === 'dependencies' || item.command?.includes('npm')) {
+      onNavigate('patch-batch')
+      return
+    }
+    setPreferredTab('overview')
+    onNavigate('full-scan')
   }
 
   return (
@@ -78,7 +132,7 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
       <div className="dashboard-hero">
         <div>
           <h2>Bridge-Desktop</h2>
-          <p>Automated technical debt reduction and metrics pipeline.</p>
+          <p>Technical debt orchestration and agent-ready scan intelligence.</p>
         </div>
         <button className="btn btn-secondary" onClick={() => onNavigate('settings')}>
           Settings
@@ -94,19 +148,17 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
         <div className="card">
           <div className="summary-label">Last Scan</div>
           <div className="summary-value">{lastScan}</div>
-          <div className="summary-sub">Run a full TD scan to update.</div>
+          <div className="summary-sub">Run full scan to refresh debt model.</div>
         </div>
         <div className="card">
-          <div className="summary-label">TD Score</div>
-          <div className="summary-value">
-            {tdScore ?? '—'}
-            {typeof tdDelta === 'number' && (
-              <span className={`delta ${tdDelta >= 0 ? 'delta-up' : 'delta-down'}`}>
-                {tdDelta >= 0 ? '+' : ''}{tdDelta}
-              </span>
-            )}
+          <div className="summary-label">Tech Debt Score</div>
+          <div className="summary-value" style={{ color: grade ? gradeColorMap[grade] : 'var(--text-primary)' }}>
+            {debtScore ? debtScore.total.toFixed(1) : '—'}
+            {grade && <span className="badge" style={{ marginLeft: '8px' }}>{grade}</span>}
           </div>
-          <div className="summary-sub">Bridge-Console</div>
+          <div className="summary-sub" style={{ color: trendMeta[trend].color }}>
+            {trendMeta[trend].arrow} {trendMeta[trend].label}
+          </div>
         </div>
       </div>
 
@@ -126,17 +178,113 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
             <div className="issue-item">{codeDirectory ? '1. Code directory selected.' : '1. Select your code directory.'}</div>
             <div className="issue-item">{repositories.length > 0 ? '2. Repositories discovered.' : '2. Scan for repositories.'}</div>
             <div className="issue-item">{selectedRepo?.hasGit ? '3. Git repository selected.' : '3. Select a git repository.'}</div>
-            <div className="issue-item">
-              4. Run `Update Dependencies` (non-breaking) and verify tests pass.
+            <div className="issue-item">4. Run full scan and review the debt score and top contributors.</div>
+            <div className="issue-item">5. Run one-click dependency patching and verify tests pass.</div>
+          </div>
+        </div>
+      )}
+
+      {selectedRepo && projectConfig && !projectConfig.exists && (
+        <div className="card" style={{ marginTop: '24px', borderColor: 'var(--accent)' }}>
+          <div className="card-header">
+            <h3 className="card-title">Initialize Bridge</h3>
+            <button className="btn btn-primary btn-sm" onClick={initializeBridgeConfig} disabled={initializingConfig}>
+              {initializingConfig ? 'Generating...' : 'Create .bridge.json'}
+            </button>
+          </div>
+          <div className="issue-list">
+            <div className="issue-item">No `.bridge.json` detected in this repo.</div>
+            <div className="issue-item">Initialize config to define update policy, gates, scan features, and agent context.</div>
+          </div>
+        </div>
+      )}
+
+      {!scanResult && selectedRepo && (
+        <div className="card" style={{ marginTop: '24px', borderColor: 'var(--accent)' }}>
+          <div className="card-header">
+            <h3 className="card-title">Run First Scan</h3>
+            <button className="btn btn-primary btn-sm" onClick={() => navigateToScan('overview', true)}>
+              Run Full Scan
+            </button>
+          </div>
+          <div className="issue-list">
+            <div className="issue-item">This repository has no scan report yet.</div>
+            <div className="issue-item">Run a full scan to generate score, top contributors, and action items.</div>
+          </div>
+        </div>
+      )}
+
+      {scanResult && debtScore && (
+        <div className="dashboard-actions" style={{ marginTop: '24px' }}>
+          <div className="card">
+            <div className="card-header">
+              <h3 className="card-title">Dimension Breakdown</h3>
             </div>
-            <div className="issue-item">
-              5. Push when ready from the updater output panel.
+            <div className="bar-list">
+              {dimensionBars.map(item => (
+                <div key={item.name} className="bar-item">
+                  <div className="bar-meta">
+                    <span>{item.name}</span>
+                    <span>{item.score.toFixed(1)}</span>
+                  </div>
+                  <div className="bar-track">
+                    <div className="bar-fill" style={{ width: `${Math.min(100, Math.max(0, item.score))}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-header">
+              <h3 className="card-title">Top Contributors</h3>
+            </div>
+            <div className="issue-list">
+              {debtScore.topContributors.slice(0, 5).map((item, index) => (
+                <div key={`${item.dimension}-${index}`} className="issue-item" style={{ justifyContent: 'space-between' }}>
+                  <span>{item.description}</span>
+                  <strong>+{item.impact}</strong>
+                </div>
+              ))}
+              {debtScore.topContributors.length === 0 && (
+                <div className="issue-item">No major contributors detected.</div>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      <div className="dashboard-actions">
+      {scanResult && debtScore && (
+        <div className="card" style={{ marginTop: '24px' }}>
+          <div className="card-header">
+            <h3 className="card-title">Prioritized Action Items</h3>
+          </div>
+          <div className="issue-list">
+            {debtScore.actionItems.slice(0, 8).map(item => (
+              <div key={`${item.priority}-${item.title}`} className="issue-item" style={{ alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                <div>
+                  <div style={{ fontWeight: 600 }}>
+                    #{item.priority} {item.title}
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    {item.dimension} · impact {item.impact} · effort {item.effort}
+                  </div>
+                </div>
+                {item.automatable && (
+                  <button className="btn btn-secondary btn-sm" onClick={() => handleActionFix(item)}>
+                    Fix
+                  </button>
+                )}
+              </div>
+            ))}
+            {debtScore.actionItems.length === 0 && (
+              <div className="issue-item">No action items generated yet.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="dashboard-actions" style={{ marginTop: '24px' }}>
         <div className="card">
           <div className="card-header">
             <h3 className="card-title">Quick Actions</h3>
@@ -217,7 +365,7 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
               {repoRemote ? `Remote detected: ${repoRemote}` : 'No git remote configured.'}
             </div>
             <div className="issue-item">
-              Branch push uses standard git credentials configured on this machine.
+              Bridge updates are executed from remote-first source-of-truth when configured.
             </div>
           </div>
         )}

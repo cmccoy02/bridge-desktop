@@ -24,6 +24,13 @@ export interface OutdatedPackage {
   isNonBreaking: boolean
   updateType: 'patch' | 'minor' | 'major' | 'unknown'
   language: Language
+  vulnerabilities?: {
+    critical: number
+    high: number
+    medium: number
+    low: number
+    total: number
+  }
 }
 
 const LANGUAGE_CONFIG: Record<Language, LanguageInfo> = {

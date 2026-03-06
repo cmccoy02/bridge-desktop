@@ -1,0 +1,138 @@
+{
+  "__comment_0": "Bridge project configuration. Keep this file in source control so all engineers and agents share policy.",
+  "__comment_1": "Fields named __comment_* are ignored by Bridge and safe to remove.",
+  "version": 1,
+  "project": {
+    "name": "bridge-desktop",
+    "primaryLanguage": "typescript",
+    "monorepo": false,
+    "workspacePatterns": [],
+    "description": "Bridge runs directly against repositories that already exist on your machine. It avoids GitHub API onboarding and uses your existing local git + optional `gh` authentication.",
+    "packageManager": "npm"
+  },
+  "dependencies": {
+    "updatePolicy": {
+      "patch": "auto",
+      "minor": "review",
+      "major": "review"
+    },
+    "bannedPackages": [],
+    "requiredPackages": [],
+    "pinnedPackages": {},
+    "maxAge": {
+      "patch": 7,
+      "minor": 30,
+      "major": 90
+    },
+    "securityPolicy": {
+      "autoFixCritical": true,
+      "autoFixHigh": true,
+      "blockOnCritical": true,
+      "blockOnHigh": false
+    }
+  },
+  "gates": {
+    "tests": {
+      "required": true,
+      "minCoverage": 80,
+      "timeout": 300
+    },
+    "lint": {
+      "required": false
+    },
+    "build": {
+      "required": true,
+      "command": "npm run build"
+    },
+    "bundleSize": {
+      "maxDeltaPercent": 10
+    },
+    "circularDependencies": {
+      "maxAllowed": 0,
+      "failOnNew": true
+    },
+    "deadCode": {
+      "maxDeadFiles": 5,
+      "maxUnusedExports": 10,
+      "failOnNew": false
+    },
+    "documentation": {
+      "requireReadme": true,
+      "requireChangelog": false,
+      "maxDaysSinceReadmeUpdate": 90
+    }
+  },
+  "agent": {
+    "context": "bridge-desktop is a React project managed with npm.",
+    "conventions": [
+      "Use strict TypeScript - avoid any types",
+      "Prefer named exports over default exports",
+      "Use async/await over raw Promise chaining",
+      "Use functional components with hooks",
+      "Co-locate component tests with component files"
+    ],
+    "avoidPatterns": [
+      "Do not use @ts-ignore without explanation",
+      "Do not disable ESLint rules inline without justification",
+      "Do not use class components"
+    ],
+    "preferredLibraries": {
+      "dates": "date-fns",
+      "validation": "zod"
+    },
+    "reviewChecklist": [
+      "Preserve existing behavior",
+      "Add or update tests for behavior changes",
+      "Keep dependency and security risk low"
+    ]
+  },
+  "scoring": {
+    "weights": {
+      "dependencies": 20,
+      "security": 25,
+      "architecture": 20,
+      "testing": 20,
+      "documentation": 5,
+      "codeHealth": 10
+    },
+    "thresholds": {
+      "maxOutdatedDeps": 10,
+      "maxCircularDeps": 0,
+      "maxDeadFiles": 5,
+      "minTestCoverage": 80,
+      "maxOversizedFiles": 10,
+      "maxDebtScore": 70
+    }
+  },
+  "scan": {
+    "schedule": "manual",
+    "exclude": [
+      "node_modules",
+      ".git",
+      "dist",
+      "build",
+      ".next",
+      "coverage",
+      ".bridge",
+      ".md"
+    ],
+    "include": [],
+    "features": {
+      "dependencies": true,
+      "security": true,
+      "circularDeps": true,
+      "deadCode": true,
+      "bundleSize": true,
+      "testCoverage": true,
+      "documentation": true,
+      "codeSmells": true,
+      "fileAnalysis": true
+    }
+  },
+  "console": {
+    "autoUpload": false,
+    "uploadOn": [
+      "scan"
+    ]
+  }
+}

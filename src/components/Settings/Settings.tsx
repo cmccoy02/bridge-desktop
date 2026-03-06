@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAppSettings } from '../../contexts/AppSettingsContext'
+import { useRepositories } from '../../contexts/RepositoryContext'
 import type { BridgeConsoleSettings } from '../../types'
 
 const emptySettings: BridgeConsoleSettings = {
@@ -11,10 +12,16 @@ const emptySettings: BridgeConsoleSettings = {
 
 export default function Settings() {
   const { settings: appSettings, saveSettings: saveAppSettings, loading: appSettingsLoading } = useAppSettings()
+  const { repositories, selectedRepo } = useRepositories()
   const [settings, setSettings] = useState<BridgeConsoleSettings>(emptySettings)
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [message, setMessage] = useState<string | null>(null)
   const [savingAppSettings, setSavingAppSettings] = useState(false)
+  const [bridgeConfigRepoPath, setBridgeConfigRepoPath] = useState<string>('')
+  const [bridgeConfigText, setBridgeConfigText] = useState('')
+  const [bridgeConfigDirty, setBridgeConfigDirty] = useState(false)
+  const [bridgeConfigLoading, setBridgeConfigLoading] = useState(false)
+  const [bridgeConfigMessage, setBridgeConfigMessage] = useState<string | null>(null)
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -28,6 +35,39 @@ export default function Settings() {
 
     void loadSettings()
   }, [])
+
+  useEffect(() => {
+    if (selectedRepo?.path) {
+      setBridgeConfigRepoPath(selectedRepo.path)
+      return
+    }
+    if (!bridgeConfigRepoPath && repositories.length > 0) {
+      setBridgeConfigRepoPath(repositories[0].path)
+    }
+  }, [selectedRepo?.path, repositories, bridgeConfigRepoPath])
+
+  useEffect(() => {
+    const loadBridgeConfig = async () => {
+      if (!bridgeConfigRepoPath) {
+        setBridgeConfigText('')
+        setBridgeConfigDirty(false)
+        return
+      }
+      setBridgeConfigLoading(true)
+      setBridgeConfigMessage(null)
+      try {
+        const config = await window.bridge.loadBridgeConfig(bridgeConfigRepoPath)
+        setBridgeConfigText(`${JSON.stringify(config, null, 2)}\n`)
+        setBridgeConfigDirty(false)
+      } catch (error) {
+        setBridgeConfigMessage(error instanceof Error ? error.message : 'Failed to load .bridge.json')
+      } finally {
+        setBridgeConfigLoading(false)
+      }
+    }
+
+    void loadBridgeConfig()
+  }, [bridgeConfigRepoPath])
 
   const updateField = (field: keyof BridgeConsoleSettings, value: string | boolean) => {
     setSettings(prev => ({ ...prev, [field]: value }))
@@ -70,6 +110,43 @@ export default function Settings() {
       setMessage(error instanceof Error ? error.message : 'Failed to save app settings')
     } finally {
       setSavingAppSettings(false)
+    }
+  }
+
+  const saveBridgeConfig = async () => {
+    if (!bridgeConfigRepoPath) return
+    setBridgeConfigMessage(null)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(bridgeConfigText)
+    } catch (error) {
+      setBridgeConfigMessage(`Invalid JSON: ${error instanceof Error ? error.message : 'parse error'}`)
+      return
+    }
+
+    try {
+      const saved = await window.bridge.saveBridgeConfig(bridgeConfigRepoPath, parsed as any)
+      setBridgeConfigText(`${JSON.stringify(saved, null, 2)}\n`)
+      setBridgeConfigDirty(false)
+      setBridgeConfigMessage('Saved .bridge.json')
+    } catch (error) {
+      setBridgeConfigMessage(error instanceof Error ? error.message : 'Failed to save .bridge.json')
+    }
+  }
+
+  const initializeBridgeConfig = async () => {
+    if (!bridgeConfigRepoPath) return
+    setBridgeConfigLoading(true)
+    setBridgeConfigMessage(null)
+    try {
+      const generated = await window.bridge.generateBridgeConfig(bridgeConfigRepoPath)
+      setBridgeConfigText(`${JSON.stringify(generated, null, 2)}\n`)
+      setBridgeConfigDirty(false)
+      setBridgeConfigMessage('Generated .bridge.json for this repository')
+    } catch (error) {
+      setBridgeConfigMessage(error instanceof Error ? error.message : 'Failed to generate .bridge.json')
+    } finally {
+      setBridgeConfigLoading(false)
     }
   }
 
@@ -187,6 +264,61 @@ export default function Settings() {
           >
             Reset First-Run Checklist
           </button>
+        </div>
+
+        <div className="card" style={{ padding: '20px' }}>
+          <h3 style={{ marginBottom: '12px' }}>.bridge.json Editor</h3>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '14px', marginBottom: '16px' }}>
+            Scope: one <code>.bridge.json</code> per repository. Bridge reads and writes this file at each repo root.
+          </p>
+
+          <div className="form-group">
+            <label>Repository</label>
+            <select
+              value={bridgeConfigRepoPath}
+              onChange={e => setBridgeConfigRepoPath(e.target.value)}
+              disabled={repositories.length === 0}
+            >
+              {repositories.length === 0 && (
+                <option value="">No repositories available</option>
+              )}
+              {repositories.map(repo => (
+                <option key={repo.path} value={repo.path}>
+                  {repo.name} — {repo.path}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label>Config JSON</label>
+            <textarea
+              value={bridgeConfigText}
+              onChange={e => {
+                setBridgeConfigText(e.target.value)
+                setBridgeConfigDirty(true)
+              }}
+              rows={18}
+              placeholder={bridgeConfigLoading ? 'Loading...' : 'Select a repository to edit .bridge.json'}
+              disabled={!bridgeConfigRepoPath || bridgeConfigLoading}
+              style={{ fontFamily: 'monospace', width: '100%' }}
+            />
+          </div>
+
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button className="btn btn-secondary" onClick={initializeBridgeConfig} disabled={!bridgeConfigRepoPath || bridgeConfigLoading}>
+              Generate
+            </button>
+            <button className="btn btn-primary" onClick={saveBridgeConfig} disabled={!bridgeConfigRepoPath || bridgeConfigLoading || !bridgeConfigDirty}>
+              Save .bridge.json
+            </button>
+          </div>
+
+          {bridgeConfigMessage && (
+            <div className="alert" style={{ marginTop: '12px' }}>
+              {bridgeConfigMessage}
+            </div>
+          )}
         </div>
       </div>
     </div>

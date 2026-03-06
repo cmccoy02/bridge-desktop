@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
-import type { BridgeProjectConfigResult, ConflictWarning, OutdatedPackage, PatchBatchResult, SecurityPatchResult } from '../../types'
+import type { BridgeConfig, BridgeProjectConfigResult, ConflictWarning, OutdatedPackage, PatchBatchResult, SecurityPatchResult } from '../../types'
 import Scheduler from '../Scheduler/Scheduler'
 
 export default function PatchBatch() {
@@ -12,6 +12,7 @@ export default function PatchBatch() {
   const [progress, setProgress] = useState<{ message: string; step: number; total: number } | null>(null)
   const [result, setResult] = useState<PatchBatchResult | null>(null)
   const [projectConfig, setProjectConfig] = useState<BridgeProjectConfigResult | null>(null)
+  const [bridgeConfig, setBridgeConfig] = useState<BridgeConfig | null>(null)
 
   const [branchName, setBranchName] = useState('bridge-update-deps')
   const [repoInfo, setRepoInfo] = useState<{ branch: string; isProtectedBranch: boolean } | null>(null)
@@ -21,6 +22,7 @@ export default function PatchBatch() {
   const [testCommandDetected, setTestCommandDetected] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [showScheduler, setShowScheduler] = useState(false)
+  const [createPrEnabled, setCreatePrEnabled] = useState(false)
 
   const [securityRunning, setSecurityRunning] = useState(false)
   const [securityProgress, setSecurityProgress] = useState<{ message: string; step: number; total: number } | null>(null)
@@ -28,15 +30,23 @@ export default function PatchBatch() {
   const [securityLogs, setSecurityLogs] = useState<string[]>([])
   const [pushingBranch, setPushingBranch] = useState(false)
   const [pushMessage, setPushMessage] = useState<string | null>(null)
+  const [dependencyDebtDelta, setDependencyDebtDelta] = useState<{ before: number; after: number; delta: number } | null>(null)
 
   const patchConfig = projectConfig?.config.patch
-  const createPrOnRun = patchConfig?.createPR ?? true
   const runTestsOnRun = patchConfig?.runTests ?? true
   const configuredBaseBranch = patchConfig?.baseBranch || projectConfig?.config.baseBranch
   const remoteFirst = patchConfig?.remoteFirst ?? true
   const runTests = runTestsOnRun
+  const updatePolicy = bridgeConfig?.dependencies.updatePolicy || { patch: 'auto', minor: 'auto', major: 'review' }
 
   const getPackageKey = (pkg: OutdatedPackage) => `${pkg.language}:${pkg.name}`
+  const estimateDependencyDebt = (list: OutdatedPackage[]) => {
+    return list.reduce((sum, pkg) => {
+      const updatePoints = pkg.updateType === 'patch' ? 1 : pkg.updateType === 'minor' ? 2 : pkg.updateType === 'major' ? 5 : 0
+      const vulnPoints = (pkg.vulnerabilities?.critical || 0) * 2 + (pkg.vulnerabilities?.high || 0)
+      return sum + updatePoints + vulnPoints
+    }, 0)
+  }
 
   const nonBreakingPackages = useMemo(
     () => packages.filter(pkg => pkg.isNonBreaking),
@@ -123,27 +133,37 @@ export default function PatchBatch() {
   const loadProjectConfig = async () => {
     if (!selectedRepo) return
     try {
-      const config = await window.bridge.getBridgeProjectConfig(selectedRepo.path)
+      const [config, fullConfig] = await Promise.all([
+        window.bridge.getBridgeProjectConfig(selectedRepo.path),
+        window.bridge.loadBridgeConfig(selectedRepo.path)
+      ])
       setProjectConfig(config)
+      setBridgeConfig(fullConfig)
+      setCreatePrEnabled(config.config.patch?.createPR ?? false)
       const configuredBranchPrefix = config.config.patch?.branchPrefix || config.config.branchPrefix
       if (configuredBranchPrefix) {
         setBranchName(configuredBranchPrefix)
       }
-      const configuredTestCommand = config.config.patch?.testCommand
+      const configuredTestCommand = config.config.patch?.testCommand || fullConfig.gates.tests.command
       if (configuredTestCommand) {
         setTestCommand(configuredTestCommand)
         setTestCommandDetected(false)
       }
     } catch {
       setProjectConfig(null)
+      setBridgeConfig(null)
+      setCreatePrEnabled(false)
     }
   }
 
   const detectTestCommand = async () => {
     if (!selectedRepo) return
     try {
-      const config = await window.bridge.getBridgeProjectConfig(selectedRepo.path)
-      const configuredCommand = config.config.patch?.testCommand
+      const [project, full] = await Promise.all([
+        window.bridge.getBridgeProjectConfig(selectedRepo.path),
+        window.bridge.loadBridgeConfig(selectedRepo.path)
+      ])
+      const configuredCommand = project.config.patch?.testCommand || full.gates.tests.command
       if (configuredCommand) {
         setTestCommand(configuredCommand)
         setTestCommandDetected(false)
@@ -208,8 +228,8 @@ export default function PatchBatch() {
     }
   }
 
-  const loadOutdatedPackages = async (options?: { preserveResult?: boolean }) => {
-    if (!selectedRepo) return
+  const loadOutdatedPackages = async (options?: { preserveResult?: boolean }): Promise<OutdatedPackage[] | null> => {
+    if (!selectedRepo) return null
 
     setLoading(true)
     if (!options?.preserveResult) {
@@ -218,15 +238,34 @@ export default function PatchBatch() {
     setLoadError(null)
 
     try {
-      const outdated = await window.bridge.getOutdatedPackages(selectedRepo.path)
-      setPackages(outdated)
+      const [outdated, fullConfig] = await Promise.all([
+        window.bridge.getOutdatedPackages(selectedRepo.path),
+        window.bridge.loadBridgeConfig(selectedRepo.path)
+      ])
 
-      setSelectedMajorPackages(new Set())
+      setBridgeConfig(fullConfig)
+      const policy = fullConfig.dependencies.updatePolicy
+      const filtered = outdated.filter(pkg => {
+        if (pkg.updateType === 'patch' && policy.patch === 'ignore') return false
+        if (pkg.updateType === 'minor' && policy.minor === 'ignore') return false
+        if (pkg.updateType === 'major' && policy.major === 'ignore') return false
+        return true
+      })
+
+      setPackages(filtered)
+
+      const autoSelectedMajors = filtered
+        .filter(pkg => pkg.updateType === 'major')
+        .filter(pkg => (pkg.vulnerabilities?.critical || 0) > 0 || (pkg.vulnerabilities?.high || 0) > 0)
+        .map(getPackageKey)
+      setSelectedMajorPackages(new Set(autoSelectedMajors))
+      return filtered
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load outdated packages'
       setLoadError(message)
       setPackages([])
       setSelectedMajorPackages(new Set())
+      return null
     } finally {
       setLoading(false)
     }
@@ -257,16 +296,29 @@ export default function PatchBatch() {
       return
     }
 
+    if (createPrEnabled) {
+      const ghStatus = await window.bridge.getGitHubCliStatus(selectedRepo.path)
+      if (!ghStatus.installed || !ghStatus.authenticated) {
+        setResult({
+          success: false,
+          error: ghStatus.message || 'PR creation requires GitHub CLI. Install with `brew install gh` and run `gh auth login`.'
+        })
+        return
+      }
+    }
+
     setRunning(true)
     setProgress(null)
     setResult(null)
+    setDependencyDebtDelta(null)
     setOutputLines([])
+    const beforeDependencyDebt = estimateDependencyDebt(packages)
 
     try {
       const nextResult = await window.bridge.runNonBreakingUpdate({
         repoPath: selectedRepo.path,
         branchName: `${branchName}-non-breaking-${Date.now()}`,
-        createPR: createPrOnRun,
+        createPR: createPrEnabled,
         runTests: runTestsOnRun,
         baseBranch: configuredBaseBranch,
         remoteFirst,
@@ -281,9 +333,17 @@ export default function PatchBatch() {
       setResult(nextResult)
 
       if (nextResult.success) {
-        await loadOutdatedPackages({ preserveResult: true })
+        const refreshedPackages = await loadOutdatedPackages({ preserveResult: true })
         await loadRepoInfo()
         await loadMergeConflictWarnings()
+        if (refreshedPackages) {
+          const afterDependencyDebt = estimateDependencyDebt(refreshedPackages)
+          setDependencyDebtDelta({
+            before: beforeDependencyDebt,
+            after: afterDependencyDebt,
+            delta: afterDependencyDebt - beforeDependencyDebt
+          })
+        }
       }
     } catch (error) {
       setResult({
@@ -363,7 +423,7 @@ export default function PatchBatch() {
   }
 
   const isJavascriptRepo = (selectedRepo.languages ?? []).includes('javascript')
-  const canPushResultBranch = Boolean(result?.success && result?.branchName && !result?.prUrl)
+  const canPushResultBranch = Boolean(result?.success && result?.branchName && !result?.prUrl && !result?.branchPushed)
 
   const pushResultBranch = async () => {
     if (!selectedRepo || !result?.branchName || pushingBranch) return
@@ -396,7 +456,7 @@ export default function PatchBatch() {
           <div>
             <h2 style={{ marginBottom: '4px' }}>Update Dependencies</h2>
             <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
-              One click runs updates from remote source-of-truth, validates, and {createPrOnRun ? 'opens a PR' : 'creates a local commit'}.
+              One click runs pull latest, test, clean install script, test, commit, and push from remote source-of-truth.
             </p>
           </div>
           <button className="btn btn-secondary btn-sm" onClick={() => void loadOutdatedPackages()} disabled={loading}>
@@ -448,8 +508,13 @@ export default function PatchBatch() {
               Using config: <code>{projectConfig.path}</code>
             </div>
             <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
-              Base branch: {configuredBaseBranch || 'origin HEAD'} · Remote-first: {remoteFirst ? 'enabled' : 'disabled'} · Mode: {createPrOnRun ? 'Auto PR' : 'Local commit'}
+              Base branch: {configuredBaseBranch || 'origin HEAD'} · Remote-first: {remoteFirst ? 'enabled' : 'disabled'} · Mode: {createPrEnabled ? 'Push + PR' : 'Push only'}
             </div>
+            {bridgeConfig && (
+              <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                Update policy: patch {updatePolicy.patch}, minor {updatePolicy.minor}, major {updatePolicy.major}
+              </div>
+            )}
             {projectConfig.errors.length > 0 && (
               <div style={{ marginTop: '6px', color: 'var(--warning)', fontSize: '12px' }}>
                 Config warning: {projectConfig.errors.join('; ')}
@@ -468,13 +533,13 @@ export default function PatchBatch() {
             >
               {running
                 ? 'Running...'
-                : createPrOnRun
+                : createPrEnabled
                   ? `One Click Update + PR (${selectedMajorPackages.size} Major Selected)`
-                  : `Update Patch/Minor + ${selectedMajorPackages.size} Major`}
+                  : `Update/Test/Commit/Push (${selectedMajorPackages.size} Major Selected)`}
             </button>
           </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '10px' }}>
-            Patch/minor updates are selected automatically. Check major versions if you want to include them.
+            Patch/minor updates follow `.bridge.json` policy. Major updates remain manual, except packages with critical/high vulnerabilities.
           </p>
           {packages.length === 0 ? (
             <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
@@ -492,6 +557,7 @@ export default function PatchBatch() {
                     <th>Latest</th>
                     <th>Update Type</th>
                     <th>Type</th>
+                    <th>Vulns</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -533,6 +599,15 @@ export default function PatchBatch() {
                           </span>
                         </td>
                         <td>{pkg.type === 'devDependencies' ? 'devDep' : 'dep'}</td>
+                        <td>
+                          {(pkg.vulnerabilities?.total || 0) > 0 ? (
+                            <span className="badge badge-warning">
+                              C{pkg.vulnerabilities?.critical || 0} H{pkg.vulnerabilities?.high || 0} M{pkg.vulnerabilities?.medium || 0} L{pkg.vulnerabilities?.low || 0}
+                            </span>
+                          ) : (
+                            <span style={{ color: 'var(--text-tertiary)' }}>0</span>
+                          )}
+                        </td>
                       </tr>
                     )
                   })}
@@ -585,11 +660,23 @@ export default function PatchBatch() {
             {result.success ? (
               <div>
                 <div style={{ fontWeight: 600, marginBottom: '8px', color: 'var(--success)' }}>
-                  {result.prUrl ? 'PR created successfully.' : `Changes committed locally on '${result.branchName}' and ready to push.`}
+                  {result.prUrl
+                    ? 'PR created successfully.'
+                    : result.branchPushed
+                      ? `Changes committed and pushed on '${result.branchName}'.`
+                      : `Changes committed locally on '${result.branchName}' and ready to push.`}
                 </div>
                 {result.prUrl && (
                   <div style={{ fontSize: '13px' }}>
                     PR: <a href={result.prUrl} target="_blank" rel="noopener noreferrer">{result.prUrl}</a>
+                  </div>
+                )}
+                {dependencyDebtDelta && (
+                  <div style={{ fontSize: '13px', marginTop: '6px' }}>
+                    Dependency debt: {dependencyDebtDelta.before} → {dependencyDebtDelta.after}{' '}
+                    <strong style={{ color: dependencyDebtDelta.delta <= 0 ? 'var(--success)' : 'var(--error)' }}>
+                      ({dependencyDebtDelta.delta >= 0 ? '+' : ''}{dependencyDebtDelta.delta})
+                    </strong>
                   </div>
                 )}
                 {canPushResultBranch && (
@@ -635,6 +722,20 @@ export default function PatchBatch() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <label className="simple-checkbox">
+            <input
+              type="checkbox"
+              checked={createPrEnabled}
+              onChange={e => setCreatePrEnabled(e.target.checked)}
+            />
+            <span className="checkbox-label">Create Pull Request (requires GitHub CLI)</span>
+          </label>
+          {createPrEnabled && (
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+              If needed: <code>brew install gh</code> then <code>gh auth login</code>.
+            </div>
+          )}
+
           <div>
             <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: 'var(--text-secondary)' }}>
               Branch name prefix

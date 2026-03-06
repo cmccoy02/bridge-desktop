@@ -22,6 +22,13 @@ export interface OutdatedPackage {
   isNonBreaking: boolean
   updateType: 'patch' | 'minor' | 'major' | 'unknown'
   language: Language
+  vulnerabilities?: {
+    critical: number
+    high: number
+    medium: number
+    low: number
+    total: number
+  }
 }
 
 export interface FileEntry {
@@ -79,6 +86,7 @@ export interface NonBreakingUpdateConfig {
   runTests: boolean
   baseBranch?: string
   remoteFirst?: boolean
+  pinnedPackages?: Record<string, string>
   selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
@@ -91,6 +99,8 @@ export interface PatchBatchResult {
   updatedPackages?: string[]
   failedPackages?: string[]
   prUrl?: string | null
+  branchName?: string
+  branchPushed?: boolean
   error?: string
   testsPassed?: boolean
   testOutput?: string
@@ -269,6 +279,7 @@ export interface VulnerabilitySummary {
 export interface DependencyReport {
   outdated: OutdatedPackage[]
   vulnerabilities: VulnerabilitySummary
+  installedPackages?: string[]
   error?: string
 }
 
@@ -333,6 +344,243 @@ export interface DocumentationDebtReport {
   error?: string
 }
 
+export interface BridgeConfig {
+  version: 1
+  project: {
+    name: string
+    description?: string
+    primaryLanguage: 'javascript' | 'typescript' | 'python' | 'ruby' | 'elixir' | 'go' | 'rust' | 'java' | 'multi'
+    packageManager?: 'npm' | 'yarn' | 'pnpm' | 'pip' | 'poetry' | 'bundler' | 'mix' | 'cargo' | 'maven' | 'gradle'
+    monorepo?: boolean
+    workspacePatterns?: string[]
+  }
+  dependencies: {
+    updatePolicy: {
+      patch: 'auto' | 'review' | 'ignore'
+      minor: 'auto' | 'review' | 'ignore'
+      major: 'review' | 'ignore'
+    }
+    bannedPackages?: string[]
+    requiredPackages?: string[]
+    pinnedPackages?: Record<string, string>
+    maxAge?: {
+      patch: number
+      minor: number
+      major: number
+    }
+    securityPolicy: {
+      autoFixCritical: boolean
+      autoFixHigh: boolean
+      blockOnCritical: boolean
+      blockOnHigh: boolean
+    }
+  }
+  gates: {
+    tests: {
+      required: boolean
+      command?: string
+      minCoverage?: number
+      timeout?: number
+    }
+    lint: {
+      required: boolean
+      command?: string
+    }
+    build: {
+      required: boolean
+      command?: string
+    }
+    bundleSize?: {
+      maxBytes?: number
+      maxDeltaPercent?: number
+    }
+    circularDependencies: {
+      maxAllowed: number
+      failOnNew: boolean
+    }
+    deadCode: {
+      maxUnusedExports: number
+      maxDeadFiles: number
+      failOnNew: boolean
+    }
+    documentation: {
+      requireReadme: boolean
+      requireChangelog: boolean
+      maxDaysSinceReadmeUpdate?: number
+    }
+  }
+  agent: {
+    context: string
+    conventions?: string[]
+    avoidPatterns?: string[]
+    preferredLibraries?: Record<string, string>
+    reviewChecklist?: string[]
+  }
+  scoring?: {
+    weights?: {
+      dependencies?: number
+      security?: number
+      architecture?: number
+      testing?: number
+      documentation?: number
+      codeHealth?: number
+    }
+    thresholds?: {
+      maxOutdatedDeps?: number
+      maxCircularDeps?: number
+      maxDeadFiles?: number
+      minTestCoverage?: number
+      maxOversizedFiles?: number
+      maxAvgFileComplexity?: number
+      maxDebtScore?: number
+    }
+  }
+  scan: {
+    schedule?: 'hourly' | 'daily' | 'weekly' | 'monthly' | 'manual'
+    exclude?: string[]
+    include?: string[]
+    features: {
+      dependencies: boolean
+      security: boolean
+      circularDeps: boolean
+      deadCode: boolean
+      bundleSize: boolean
+      testCoverage: boolean
+      documentation: boolean
+      codeSmells: boolean
+      fileAnalysis: boolean
+    }
+  }
+  console?: {
+    projectId?: string
+    autoUpload: boolean
+    uploadOn?: ('scan' | 'update' | 'schedule')[]
+  }
+}
+
+export interface SecurityPatternFinding {
+  file: string
+  line: number
+  column?: number
+  severity: 'critical' | 'high' | 'medium' | 'low'
+  category: string
+  cwe?: string
+  owasp?: string
+  title: string
+  description: string
+  suggestion: string
+  snippet: string
+}
+
+export interface DimensionScore {
+  score: number
+  weight: number
+  weightedScore: number
+  findings: string[]
+  metrics: Record<string, number | string>
+}
+
+export interface DebtContributor {
+  dimension: string
+  description: string
+  impact: number
+  fixable: boolean
+  effort: 'trivial' | 'small' | 'medium' | 'large'
+}
+
+export interface ActionItem {
+  priority: number
+  title: string
+  description: string
+  dimension: string
+  impact: number
+  effort: 'trivial' | 'small' | 'medium' | 'large'
+  automatable: boolean
+  command?: string
+}
+
+export interface TechDebtScore {
+  total: number
+  grade: 'A' | 'B' | 'C' | 'D' | 'F'
+  trend: 'improving' | 'stable' | 'declining' | 'unknown'
+  dimensions: {
+    dependencies: DimensionScore
+    security: DimensionScore
+    architecture: DimensionScore
+    testing: DimensionScore
+    documentation: DimensionScore
+    codeHealth: DimensionScore
+  }
+  topContributors: DebtContributor[]
+  actionItems: ActionItem[]
+}
+
+export interface GateResult {
+  name: string
+  passed: boolean
+  message: string
+  severity: 'error' | 'warning' | 'info'
+  details?: Record<string, any>
+}
+
+export interface BridgeScanReport {
+  version: 1
+  generatedAt: string
+  generatedBy: 'bridge-desktop' | 'bridge-cli' | 'bridge-ci'
+  repository: {
+    path: string
+    name: string
+    url?: string
+    branch?: string
+    commit?: string
+    language: string
+    packageManager?: string
+  }
+  durationMs: number
+  config: BridgeConfig
+  techDebt: TechDebtScore
+  dependencies: DependencyReport
+  security: {
+    vulnerabilities: VulnerabilitySummary
+    patternFindings: SecurityPatternFinding[]
+  }
+  architecture: {
+    circularDependencies: CircularDependencyReport
+    deadCode: DeadCodeReport
+    bundleSize: BundleAnalysisReport
+    oversizedFiles: OversizedComponent[]
+  }
+  testing: {
+    coverage: TestCoverageReport
+    hasTests: boolean
+    testCommand?: string
+  }
+  documentation: DocumentationDebtReport
+  gates: {
+    passed: boolean
+    results: GateResult[]
+  }
+  agentDigest: {
+    debtScore: number
+    grade: string
+    critical: string[]
+    actions: ActionItem[]
+    policies: {
+      banned_present: string[]
+      missing_required: string[]
+      update_policy: BridgeConfig['dependencies']['updatePolicy']
+    }
+    conventions: string[]
+    context: string
+    outdated_summary: {
+      total: number
+      patch: number
+      minor: number
+      major: number
+    }
+  }
+}
+
 export interface ConsoleUploadResult {
   success: boolean
   tdScore?: number
@@ -344,12 +592,34 @@ export interface FullScanResult {
   scanDate: string
   repository: string
   repositoryUrl?: string | null
+  config: BridgeConfig
   dependencies: DependencyReport
   circularDependencies: CircularDependencyReport
   deadCode: DeadCodeReport
   bundleSize: BundleAnalysisReport
   testCoverage: TestCoverageReport
   documentation: DocumentationDebtReport
+  securityPatterns: SecurityPatternFinding[]
+  oversizedFiles: OversizedComponent[]
+  codeHealth: {
+    todoCount: number
+    consoleLogCount: number
+    commentedOutBlockCount: number
+    mixedTabsSpaces: boolean
+    inconsistentQuoteStyle: boolean
+    hasLinter: boolean
+    hasFormatter: boolean
+    packageScriptsCount: number
+    hasGitignore: boolean
+  }
+  techDebtScore: TechDebtScore
+  scanReport?: BridgeScanReport
+  reportPaths?: {
+    latestReportPath: string
+    latestScorePath: string
+    archivePath: string
+    configSnapshotPath: string
+  }
   consoleUpload?: ConsoleUploadResult
   durationMs: number
 }
@@ -400,6 +670,18 @@ contextBridge.exposeInMainWorld('bridge', {
 
   getBridgeProjectConfig: (repoPath: string): Promise<BridgeProjectConfigResult> =>
     ipcRenderer.invoke('get-bridge-project-config', repoPath),
+
+  loadBridgeConfig: (repoPath: string): Promise<BridgeConfig> =>
+    ipcRenderer.invoke('load-bridge-config', repoPath),
+
+  generateBridgeConfig: (repoPath: string): Promise<BridgeConfig> =>
+    ipcRenderer.invoke('generate-bridge-config', repoPath),
+
+  saveBridgeConfig: (repoPath: string, config: BridgeConfig): Promise<BridgeConfig> =>
+    ipcRenderer.invoke('save-bridge-config', repoPath, config),
+
+  getTechDebtScore: (repoPath: string): Promise<TechDebtScore> =>
+    ipcRenderer.invoke('get-tech-debt-score', repoPath),
 
   detectLanguages: (path: string): Promise<Language[]> =>
     ipcRenderer.invoke('detect-languages', path),
@@ -582,6 +864,10 @@ declare global {
       readDirectory: (path: string) => Promise<FileEntry[]>
       readFile: (path: string) => Promise<string>
       getBridgeProjectConfig: (repoPath: string) => Promise<BridgeProjectConfigResult>
+      loadBridgeConfig: (repoPath: string) => Promise<BridgeConfig>
+      generateBridgeConfig: (repoPath: string) => Promise<BridgeConfig>
+      saveBridgeConfig: (repoPath: string, config: BridgeConfig) => Promise<BridgeConfig>
+      getTechDebtScore: (repoPath: string) => Promise<TechDebtScore>
       detectLanguages: (path: string) => Promise<Language[]>
       getRepositories: () => Promise<Repository[]>
       saveRepositories: (repos: Repository[]) => Promise<boolean>

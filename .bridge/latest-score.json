@@ -1,0 +1,312 @@
+{
+  "total": 31,
+  "grade": "C",
+  "trend": "unknown",
+  "dimensions": {
+    "dependencies": {
+      "score": 0,
+      "weight": 20,
+      "weightedScore": 0,
+      "findings": [],
+      "metrics": {
+        "outdatedCount": 0,
+        "patchCount": 0,
+        "minorCount": 0,
+        "majorCount": 0
+      }
+    },
+    "security": {
+      "score": 0,
+      "weight": 25,
+      "weightedScore": 0,
+      "findings": [],
+      "metrics": {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "total": 0
+      }
+    },
+    "architecture": {
+      "score": 70,
+      "weight": 20,
+      "weightedScore": 14,
+      "findings": [
+        "repomix-output.md exceeds 500 lines (43072)",
+        "repomix-output.md exceeds 1000 lines (43072)",
+        "sandbox/fixtures/large-fixture.json exceeds 500 lines (2003)",
+        "sandbox/fixtures/large-fixture.json exceeds 1000 lines (2003)",
+        "electron/services/patchBatch.ts exceeds 500 lines (1838)",
+        "electron/services/patchBatch.ts exceeds 1000 lines (1838)",
+        "electron/services/analysis.ts exceeds 500 lines (1482)",
+        "electron/services/analysis.ts exceeds 1000 lines (1482)",
+        "src/index.css exceeds 500 lines (1175)",
+        "src/index.css exceeds 1000 lines (1175)",
+        "electron/preload.ts exceeds 500 lines (921)",
+        "src/components/PatchBatch/PatchBatch.tsx exceeds 500 lines (823)",
+        "bridge-mcp/src/core/bridgeConfig.ts exceeds 500 lines (807)",
+        "electron/main.ts exceeds 500 lines (694)",
+        "src/components/Scheduler/Scheduler.tsx exceeds 500 lines (680)",
+        "src/types/index.ts exceeds 500 lines (638)",
+        "src/components/FullScan/FullScan.tsx exceeds 500 lines (604)",
+        "bridge-mcp/src/core/repoAnalyzer.ts exceeds 500 lines (583)",
+        "bridge-mcp/src/core/scorer.ts exceeds 500 lines (546)",
+        "electron/services/scheduler.ts exceeds 500 lines (523)"
+      ],
+      "metrics": {
+        "circularDeps": 0,
+        "filesOver500": 15,
+        "filesOver1000": 5
+      }
+    },
+    "testing": {
+      "score": 70,
+      "weight": 20,
+      "weightedScore": 14,
+      "findings": [
+        "No test command found",
+        "No test files detected"
+      ],
+      "metrics": {
+        "hasTests": 0,
+        "hasTestFiles": 0,
+        "hasCoverageData": 0
+      }
+    },
+    "documentation": {
+      "score": 0,
+      "weight": 5,
+      "weightedScore": 0,
+      "findings": [],
+      "metrics": {
+        "readmeExists": 1,
+        "readmeWordCount": 415
+      }
+    },
+    "codeHealth": {
+      "score": 30,
+      "weight": 10,
+      "weightedScore": 3,
+      "findings": [
+        "TODO/FIXME/HACK markers exceed 10 (54)",
+        "TODO/FIXME/HACK markers exceed 30 (54)",
+        "No linter configured"
+      ],
+      "metrics": {
+        "todoCount": 54,
+        "hasLinter": 0
+      }
+    }
+  },
+  "topContributors": [
+    {
+      "dimension": "testing",
+      "description": "No test command found",
+      "impact": 40,
+      "fixable": true,
+      "effort": "medium"
+    },
+    {
+      "dimension": "testing",
+      "description": "No test files detected",
+      "impact": 30,
+      "fixable": true,
+      "effort": "medium"
+    },
+    {
+      "dimension": "codeHealth",
+      "description": "TODO/FIXME/HACK markers exceed 10 (54)",
+      "impact": 10,
+      "fixable": false,
+      "effort": "small"
+    },
+    {
+      "dimension": "codeHealth",
+      "description": "TODO/FIXME/HACK markers exceed 30 (54)",
+      "impact": 10,
+      "fixable": false,
+      "effort": "medium"
+    },
+    {
+      "dimension": "codeHealth",
+      "description": "No linter configured",
+      "impact": 10,
+      "fixable": true,
+      "effort": "small"
+    },
+    {
+      "dimension": "architecture",
+      "description": "repomix-output.md exceeds 1000 lines (43072)",
+      "impact": 5,
+      "fixable": false,
+      "effort": "large"
+    },
+    {
+      "dimension": "architecture",
+      "description": "sandbox/fixtures/large-fixture.json exceeds 1000 lines (2003)",
+      "impact": 5,
+      "fixable": false,
+      "effort": "large"
+    },
+    {
+      "dimension": "architecture",
+      "description": "electron/services/patchBatch.ts exceeds 1000 lines (1838)",
+      "impact": 5,
+      "fixable": false,
+      "effort": "large"
+    },
+    {
+      "dimension": "architecture",
+      "description": "electron/services/analysis.ts exceeds 1000 lines (1482)",
+      "impact": 5,
+      "fixable": false,
+      "effort": "large"
+    },
+    {
+      "dimension": "architecture",
+      "description": "src/index.css exceeds 1000 lines (1175)",
+      "impact": 5,
+      "fixable": false,
+      "effort": "large"
+    }
+  ],
+  "actionItems": [
+    {
+      "priority": 1,
+      "title": "No test command found",
+      "description": "No test command found",
+      "dimension": "testing",
+      "impact": 40,
+      "effort": "medium",
+      "automatable": true
+    },
+    {
+      "priority": 2,
+      "title": "No test files detected",
+      "description": "No test files detected",
+      "dimension": "testing",
+      "impact": 30,
+      "effort": "medium",
+      "automatable": true
+    },
+    {
+      "priority": 3,
+      "title": "No linter configured",
+      "description": "No linter configured",
+      "dimension": "codeHealth",
+      "impact": 10,
+      "effort": "small",
+      "automatable": true,
+      "command": "npm init @eslint/config"
+    },
+    {
+      "priority": 4,
+      "title": "TODO/FIXME/HACK markers exceed 10 (54)",
+      "description": "TODO/FIXME/HACK markers exceed 10 (54)",
+      "dimension": "codeHealth",
+      "impact": 10,
+      "effort": "small",
+      "automatable": false
+    },
+    {
+      "priority": 5,
+      "title": "TODO/FIXME/HACK markers exceed 30 (54)",
+      "description": "TODO/FIXME/HACK markers exceed 30 (54)",
+      "dimension": "codeHealth",
+      "impact": 10,
+      "effort": "medium",
+      "automatable": false
+    },
+    {
+      "priority": 6,
+      "title": "repomix-output.md exceeds 1000 lines (43072)",
+      "description": "repomix-output.md exceeds 1000 lines (43072)",
+      "dimension": "architecture",
+      "impact": 5,
+      "effort": "large",
+      "automatable": false
+    },
+    {
+      "priority": 7,
+      "title": "sandbox/fixtures/large-fixture.json exceeds 1000 lines (2003)",
+      "description": "sandbox/fixtures/large-fixture.json exceeds 1000 lines (2003)",
+      "dimension": "architecture",
+      "impact": 5,
+      "effort": "large",
+      "automatable": false
+    },
+    {
+      "priority": 8,
+      "title": "electron/services/patchBatch.ts exceeds 1000 lines (1838)",
+      "description": "electron/services/patchBatch.ts exceeds 1000 lines (1838)",
+      "dimension": "architecture",
+      "impact": 5,
+      "effort": "large",
+      "automatable": false
+    },
+    {
+      "priority": 9,
+      "title": "electron/services/analysis.ts exceeds 1000 lines (1482)",
+      "description": "electron/services/analysis.ts exceeds 1000 lines (1482)",
+      "dimension": "architecture",
+      "impact": 5,
+      "effort": "large",
+      "automatable": false
+    },
+    {
+      "priority": 10,
+      "title": "src/index.css exceeds 1000 lines (1175)",
+      "description": "src/index.css exceeds 1000 lines (1175)",
+      "dimension": "architecture",
+      "impact": 5,
+      "effort": "large",
+      "automatable": false
+    },
+    {
+      "priority": 11,
+      "title": "repomix-output.md exceeds 500 lines (43072)",
+      "description": "repomix-output.md exceeds 500 lines (43072)",
+      "dimension": "architecture",
+      "impact": 3,
+      "effort": "medium",
+      "automatable": false
+    },
+    {
+      "priority": 12,
+      "title": "sandbox/fixtures/large-fixture.json exceeds 500 lines (2003)",
+      "description": "sandbox/fixtures/large-fixture.json exceeds 500 lines (2003)",
+      "dimension": "architecture",
+      "impact": 3,
+      "effort": "medium",
+      "automatable": false
+    },
+    {
+      "priority": 13,
+      "title": "electron/services/patchBatch.ts exceeds 500 lines (1838)",
+      "description": "electron/services/patchBatch.ts exceeds 500 lines (1838)",
+      "dimension": "architecture",
+      "impact": 3,
+      "effort": "medium",
+      "automatable": false
+    },
+    {
+      "priority": 14,
+      "title": "electron/services/analysis.ts exceeds 500 lines (1482)",
+      "description": "electron/services/analysis.ts exceeds 500 lines (1482)",
+      "dimension": "architecture",
+      "impact": 3,
+      "effort": "medium",
+      "automatable": false
+    },
+    {
+      "priority": 15,
+      "title": "src/index.css exceeds 500 lines (1175)",
+      "description": "src/index.css exceeds 500 lines (1175)",
+      "dimension": "architecture",
+      "impact": 3,
+      "effort": "medium",
+      "automatable": false
+    }
+  ]
+}

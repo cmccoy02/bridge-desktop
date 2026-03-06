@@ -15,6 +15,8 @@ import {
   Language,
   OutdatedPackage
 } from './languages'
+import { loadBridgeConfig } from './bridgeConfig'
+import { evaluateGates } from './gateEvaluator'
 import {
   commitChanges,
   pushBranch,
@@ -50,6 +52,7 @@ export interface NonBreakingUpdateConfig {
   runTests: boolean
   baseBranch?: string
   remoteFirst?: boolean
+  pinnedPackages?: Record<string, string>
   selectedMajorPackages?: string[]
   testCommand?: string
   testTimeoutMs?: number
@@ -63,6 +66,7 @@ export interface PatchBatchResult {
   failedPackages?: string[]
   prUrl?: string | null
   branchName?: string
+  branchPushed?: boolean
   error?: string
   testsPassed?: boolean
   testOutput?: string
@@ -553,6 +557,42 @@ async function cleanupIsolatedWorkspace(
   }
 }
 
+interface BridgeUpdateLogEntry {
+  timestamp: string
+  workflow: 'patch-batch' | 'non-breaking' | 'security'
+  branchName: string
+  updatedPackages: string[]
+  failedPackages?: string[]
+  createPR: boolean
+  prUrl?: string | null
+  testsPassed?: boolean
+  gatesPassed?: boolean
+}
+
+async function appendBridgeUpdateLog(repoPath: string, entry: BridgeUpdateLogEntry): Promise<void> {
+  const bridgeDir = path.join(repoPath, '.bridge')
+  const logPath = path.join(bridgeDir, 'update-log.json')
+  await fs.mkdir(bridgeDir, { recursive: true })
+
+  let existing: BridgeUpdateLogEntry[] = []
+  try {
+    const raw = await fs.readFile(logPath, 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      existing = parsed as BridgeUpdateLogEntry[]
+    }
+  } catch {
+    existing = []
+  }
+
+  existing.unshift(entry)
+  if (existing.length > 200) {
+    existing = existing.slice(0, 200)
+  }
+
+  await fs.writeFile(logPath, JSON.stringify(existing, null, 2) + '\n', 'utf-8')
+}
+
 function normalizeBranchName(branchName: string): string {
   const normalized = branchName.trim().replace(/[^a-zA-Z0-9/_-]+/g, '-')
   if (!normalized) {
@@ -579,6 +619,165 @@ function classifyUpdateType(current: string, latest: string): OutdatedPackage['u
   return 'unknown'
 }
 
+interface PackageVulnerabilityCount {
+  critical: number
+  high: number
+  medium: number
+  low: number
+  total: number
+}
+
+async function getInstalledDependencyNames(repoPath: string): Promise<string[]> {
+  try {
+    const raw = await fs.readFile(path.join(repoPath, 'package.json'), 'utf-8')
+    const pkg = JSON.parse(raw)
+    const names = new Set<string>()
+    for (const key of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+      const section = pkg?.[key]
+      if (section && typeof section === 'object') {
+        for (const depName of Object.keys(section)) {
+          names.add(depName)
+        }
+      }
+    }
+    return Array.from(names)
+  } catch {
+    return []
+  }
+}
+
+async function getJavascriptAuditVulnerabilityMap(repoPath: string): Promise<Map<string, PackageVulnerabilityCount>> {
+  const map = new Map<string, PackageVulnerabilityCount>()
+  try {
+    const { stdout } = await runCommand('npm audit --json', repoPath, {
+      timeout: 120000,
+      maxBuffer: 20 * 1024 * 1024
+    })
+    const payload = JSON.parse(stdout || '{}')
+
+    if (payload.vulnerabilities && typeof payload.vulnerabilities === 'object') {
+      for (const [name, meta] of Object.entries(payload.vulnerabilities) as [string, any][]) {
+        const severity = String(meta?.severity || '').toLowerCase()
+        const existing = map.get(name) || { critical: 0, high: 0, medium: 0, low: 0, total: 0 }
+        if (severity === 'critical') existing.critical += 1
+        else if (severity === 'high') existing.high += 1
+        else if (severity === 'moderate' || severity === 'medium') existing.medium += 1
+        else if (severity === 'low') existing.low += 1
+        existing.total = existing.critical + existing.high + existing.medium + existing.low
+        map.set(name, existing)
+      }
+    }
+
+    if (payload.advisories && typeof payload.advisories === 'object') {
+      for (const advisory of Object.values(payload.advisories) as any[]) {
+        const name = String(advisory?.module_name || '')
+        if (!name) continue
+        const severity = String(advisory?.severity || '').toLowerCase()
+        const existing = map.get(name) || { critical: 0, high: 0, medium: 0, low: 0, total: 0 }
+        if (severity === 'critical') existing.critical += 1
+        else if (severity === 'high') existing.high += 1
+        else if (severity === 'moderate' || severity === 'medium') existing.medium += 1
+        else if (severity === 'low') existing.low += 1
+        existing.total = existing.critical + existing.high + existing.medium + existing.low
+        map.set(name, existing)
+      }
+    }
+  } catch {
+    // Best effort: vulnerability metadata is optional for package listing.
+  }
+
+  return map
+}
+
+async function warnOnGateFailures(
+  repoPath: string,
+  onLog: (message: string) => void,
+  onWarning: (warning: { message: string; output: string }) => void,
+  fallbackCoverage: number | null
+): Promise<{ passed: boolean; failingGateNames: string[] }> {
+  try {
+    const [config, outdated, vulnerabilityMap, installedPackages] = await Promise.all([
+      loadBridgeConfig(repoPath),
+      getJsOutdatedPackages(repoPath),
+      getJavascriptAuditVulnerabilityMap(repoPath),
+      getInstalledDependencyNames(repoPath)
+    ])
+
+    const vulnerabilitySummary = { critical: 0, high: 0, medium: 0, low: 0, total: 0 }
+    for (const counts of vulnerabilityMap.values()) {
+      vulnerabilitySummary.critical += counts.critical
+      vulnerabilitySummary.high += counts.high
+      vulnerabilitySummary.medium += counts.medium
+      vulnerabilitySummary.low += counts.low
+      vulnerabilitySummary.total += counts.total
+    }
+
+    const gateResults = evaluateGates(config, {
+      dependencies: {
+        outdated,
+        vulnerabilities: vulnerabilitySummary,
+        installedPackages
+      },
+      deadCode: {
+        deadFiles: [],
+        unusedExports: [],
+        totalDeadCodeCount: 0
+      },
+      circularDependencies: {
+        count: 0,
+        dependencies: []
+      },
+      bundleSize: {
+        totalSize: 0,
+        totalSizeFormatted: '0 B',
+        largestModules: []
+      },
+      testCoverage: {
+        coveragePercentage: fallbackCoverage,
+        uncoveredCriticalFiles: []
+      },
+      documentation: {
+        missingReadmeSections: [],
+        readmeOutdated: false,
+        daysSinceUpdate: 0,
+        undocumentedFunctions: 0
+      },
+      techDebt: {
+        total: 0
+      } as any
+    } as any)
+
+    const failing = gateResults.filter(gate => !gate.passed)
+    if (failing.length > 0) {
+      for (const gate of failing) {
+        onWarning({
+          message: `Gate ${gate.name} failed (${gate.severity}): ${gate.message}`,
+          output: ''
+        })
+      }
+      return {
+        passed: false,
+        failingGateNames: failing.map(gate => gate.name)
+      }
+    } else {
+      onLog('✓ Post-update gate evaluation passed')
+      return {
+        passed: true,
+        failingGateNames: []
+      }
+    }
+  } catch (error) {
+    onWarning({
+      message: 'Post-update gate evaluation failed to run',
+      output: error instanceof Error ? error.message : String(error)
+    })
+    return {
+      passed: false,
+      failingGateNames: ['gate-evaluation-error']
+    }
+  }
+}
+
 export async function getJsOutdatedPackages(repoPath: string): Promise<OutdatedPackage[]> {
   const packageJsonPath = path.join(repoPath, 'package.json')
   try {
@@ -589,6 +788,7 @@ export async function getJsOutdatedPackages(repoPath: string): Promise<OutdatedP
   try {
     const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8')
     const packageJson = JSON.parse(packageJsonContent)
+    const vulnerabilityMap = await getJavascriptAuditVulnerabilityMap(repoPath)
 
     const devDeps = new Set(Object.keys(packageJson.devDependencies || {}))
 
@@ -628,14 +828,15 @@ export async function getJsOutdatedPackages(repoPath: string): Promise<OutdatedP
         hasPatchUpdate,
         isNonBreaking: updateType === 'patch' || updateType === 'minor',
         updateType,
-        language: 'javascript'
+        language: 'javascript',
+        vulnerabilities: vulnerabilityMap.get(name) || { critical: 0, high: 0, medium: 0, low: 0, total: 0 }
       })
     }
 
     const order: Record<OutdatedPackage['updateType'], number> = {
-      major: 0,
+      patch: 0,
       minor: 1,
-      patch: 2,
+      major: 2,
       unknown: 3
     }
 
@@ -723,7 +924,7 @@ export async function runPatchBatchPipeline(
   const onWarning = handlers.onWarning || (() => {})
   const safeBranchName = normalizeBranchName(branchName)
 
-  const totalSteps = 4 + (shouldRunTests ? 1 : 0) + (createPR ? 2 : 0)
+  const totalSteps = 5 + (shouldRunTests ? 1 : 0) + (createPR ? 1 : 0)
   let currentStep = 0
 
   const primaryLang = packages[0]?.language || 'javascript'
@@ -906,11 +1107,31 @@ export async function runPatchBatchPipeline(
     if (!createPR) {
       onLog('[3/3] Committing updates...')
       onLog(`✓ Updates committed to branch '${safeBranchName}'`)
+      onProgress('Pushing branch...', ++currentStep, totalSteps)
+      await pushBranch(workspacePath, safeBranchName)
+      onLog(`✓ Branch pushed: ${safeBranchName}`)
+      const gateCheck = await warnOnGateFailures(
+        workspacePath,
+        onLog,
+        onWarning,
+        shouldRunTests ? 100 : null
+      )
+      await appendBridgeUpdateLog(repoPath, {
+        timestamp: new Date().toISOString(),
+        workflow: 'patch-batch',
+        branchName: safeBranchName,
+        updatedPackages: allUpdated,
+        failedPackages: allFailed,
+        createPR: false,
+        testsPassed: shouldRunTests ? testsPassed : undefined,
+        gatesPassed: gateCheck.passed
+      })
       return {
         success: true,
         updatedPackages: allUpdated,
         failedPackages: allFailed,
         branchName: safeBranchName,
+        branchPushed: true,
         testsPassed: shouldRunTests ? testsPassed : undefined,
         testOutput
       }
@@ -959,6 +1180,23 @@ export async function runPatchBatchPipeline(
 
     onLog(`✓ PR created: ${prUrl}`)
     deleteBranchOnCleanup = true
+    const gateCheck = await warnOnGateFailures(
+      workspacePath,
+      onLog,
+      onWarning,
+      shouldRunTests ? 100 : null
+    )
+    await appendBridgeUpdateLog(repoPath, {
+      timestamp: new Date().toISOString(),
+      workflow: 'patch-batch',
+      branchName: safeBranchName,
+      updatedPackages: allUpdated,
+      failedPackages: allFailed,
+      createPR: true,
+      prUrl,
+      testsPassed: shouldRunTests ? testsPassed : undefined,
+      gatesPassed: gateCheck.passed
+    })
 
     return {
       success: true,
@@ -1000,6 +1238,7 @@ export async function runNonBreakingUpdatePipeline(
     runTests: shouldRunTests,
     baseBranch,
     remoteFirst,
+    pinnedPackages = {},
     selectedMajorPackages = [],
     testCommand,
     testTimeoutMs,
@@ -1012,15 +1251,27 @@ export async function runNonBreakingUpdatePipeline(
   const onWarning = handlers.onWarning || (() => {})
   const safeBranchName = normalizeBranchName(branchName)
 
-  const totalSteps = 4 + (shouldRunTests ? 2 : 0) + (selectedMajorPackages.length > 0 ? 1 : 0) + (createPR ? 2 : 0)
+  const totalSteps = 5 + (shouldRunTests ? 2 : 0) + (selectedMajorPackages.length > 0 ? 1 : 0) + (createPR ? 1 : 0)
   let currentStep = 0
   let workspacePath = repoPath
   let workspaceCreated = false
   let deleteBranchOnCleanup = true
   const validationOutput: string[] = []
-  const validationCommands = shouldRunTests
-    ? await resolveJavascriptValidationCommands(repoPath, testCommand)
-    : []
+  let validationCommands: ValidationStep[] = []
+  let effectivePinnedPackages: Record<string, string> = { ...pinnedPackages }
+  let effectiveSelectedMajorPackages: string[] = []
+  let effectiveTestCommand = testCommand
+  let effectiveTimeoutMs = testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS
+  let updatePolicy: { patch: 'auto' | 'review' | 'ignore'; minor: 'auto' | 'review' | 'ignore'; major: 'review' | 'ignore' } = {
+    patch: 'auto',
+    minor: 'review',
+    major: 'review'
+  }
+  let policyAutoNonBreaking: string[] = []
+  let policyReviewNonBreaking: string[] = []
+  let policyIgnoredNonBreaking: string[] = []
+  let policyPinnedNonBreaking: string[] = []
+  let policyBannedSelected: string[] = []
 
   const fail = async (message: string, extra?: Partial<PatchBatchResult>): Promise<PatchBatchResult> => {
     onLog(`✗ ${message}`)
@@ -1039,6 +1290,91 @@ export async function runNonBreakingUpdatePipeline(
     return fail("Git and package.json are required for non-breaking updates.")
   }
 
+  try {
+    const bridgeConfig = await loadBridgeConfig(repoPath)
+    updatePolicy = bridgeConfig.dependencies.updatePolicy
+    effectivePinnedPackages = {
+      ...(bridgeConfig.dependencies.pinnedPackages || {}),
+      ...pinnedPackages
+    }
+    effectiveTestCommand = testCommand || bridgeConfig.gates?.tests?.command || undefined
+    if (!testTimeoutMs && bridgeConfig.gates?.tests?.timeout) {
+      effectiveTimeoutMs = bridgeConfig.gates.tests.timeout * 1000
+    }
+
+    if (shouldRunTests) {
+      validationCommands = await resolveJavascriptValidationCommands(repoPath, effectiveTestCommand)
+    }
+
+    const beforeOutdated = await getJsOutdatedPackages(repoPath)
+    const nonBreakingBefore = beforeOutdated.filter(pkg => pkg.isNonBreaking)
+    for (const pkg of nonBreakingBefore) {
+      if (effectivePinnedPackages[pkg.name]) {
+        policyPinnedNonBreaking.push(pkg.name)
+        continue
+      }
+
+      if (pkg.updateType === 'patch') {
+        if (updatePolicy.patch === 'ignore') {
+          policyIgnoredNonBreaking.push(pkg.name)
+        } else if (updatePolicy.patch === 'auto') {
+          policyAutoNonBreaking.push(pkg.name)
+        } else {
+          policyReviewNonBreaking.push(pkg.name)
+        }
+      } else if (pkg.updateType === 'minor') {
+        if (updatePolicy.minor === 'ignore') {
+          policyIgnoredNonBreaking.push(pkg.name)
+        } else if (updatePolicy.minor === 'auto') {
+          policyAutoNonBreaking.push(pkg.name)
+        } else {
+          policyReviewNonBreaking.push(pkg.name)
+        }
+      } else {
+        policyReviewNonBreaking.push(pkg.name)
+      }
+    }
+
+    const bannedPackages = new Set((bridgeConfig.dependencies.bannedPackages || []).map(name => name.toLowerCase()))
+    const normalizedMajorSelection = new Set<string>()
+    for (const pkgName of selectedMajorPackages) {
+      if (normalizedMajorSelection.has(pkgName)) continue
+      normalizedMajorSelection.add(pkgName)
+
+      if (effectivePinnedPackages[pkgName]) {
+        onLog(`Skipping ${pkgName} - pinned to ${effectivePinnedPackages[pkgName]} in .bridge.json`)
+        continue
+      }
+      if (updatePolicy.major === 'ignore') {
+        onLog(`Skipping ${pkgName} - major updates are ignored by .bridge.json policy`)
+        continue
+      }
+      if (bannedPackages.has(pkgName.toLowerCase())) {
+        policyBannedSelected.push(pkgName)
+      }
+      effectiveSelectedMajorPackages.push(pkgName)
+    }
+    effectiveSelectedMajorPackages = Array.from(new Set(effectiveSelectedMajorPackages))
+
+    const selectedPackageNames = new Set<string>([
+      ...policyAutoNonBreaking,
+      ...effectiveSelectedMajorPackages
+    ])
+    for (const pkgName of selectedPackageNames) {
+      if (bannedPackages.has(pkgName.toLowerCase())) {
+        onLog(`WARNING: ${pkgName} is in the banned packages list in .bridge.json`)
+      }
+    }
+  } catch (error) {
+    onWarning({
+      message: `Bridge config integration failed, using pipeline defaults: ${formatError(error, 'Unknown config error')}`,
+      output: ''
+    })
+    if (shouldRunTests) {
+      validationCommands = await resolveJavascriptValidationCommands(repoPath, testCommand)
+    }
+  }
+
   if (createPR) {
     const ghStatus = await getGitHubCliStatus(repoPath)
     if (!ghStatus.installed || !ghStatus.authenticated) {
@@ -1048,36 +1384,31 @@ export async function runNonBreakingUpdatePipeline(
 
   try {
     const beforeOutdated = await getJsOutdatedPackages(repoPath)
-    const nonBreakingBefore = beforeOutdated.filter(pkg => pkg.isNonBreaking)
-    if (nonBreakingBefore.length === 0 && selectedMajorPackages.length === 0) {
-      return fail('No non-breaking updates available and no major packages selected.')
+    const allNonBreakingBefore = beforeOutdated.filter(pkg => pkg.isNonBreaking)
+    const policyDrivenSelectionActive =
+      policyAutoNonBreaking.length > 0 ||
+      policyReviewNonBreaking.length > 0 ||
+      policyIgnoredNonBreaking.length > 0 ||
+      policyPinnedNonBreaking.length > 0
+    const nonBreakingBefore = policyDrivenSelectionActive
+      ? allNonBreakingBefore.filter(pkg => policyAutoNonBreaking.includes(pkg.name))
+      : allNonBreakingBefore
+
+    if (policyReviewNonBreaking.length > 0) {
+      onLog(`Review required by update policy (not auto-updating): ${policyReviewNonBreaking.join(', ')}`)
+    }
+    if (policyIgnoredNonBreaking.length > 0) {
+      onLog(`Ignored by update policy: ${policyIgnoredNonBreaking.join(', ')}`)
+    }
+    if (policyPinnedNonBreaking.length > 0) {
+      onLog(`Pinned in .bridge.json (not auto-updating): ${policyPinnedNonBreaking.join(', ')}`)
+    }
+    if (policyBannedSelected.length > 0) {
+      onLog(`WARNING: Selected packages also appear in bannedPackages: ${policyBannedSelected.join(', ')}`)
     }
 
-    if (shouldRunTests) {
-      if (validationCommands.length === 0) {
-        onWarning({
-          message: 'No validation scripts found (test/lint/build). Continuing without pre/post validation checks.',
-          output: 'Define scripts in package.json to enable automated validation.'
-        })
-      } else {
-        onProgress('Running pre-update validation...', ++currentStep, totalSteps)
-        onLog('[1/5] Running baseline validation in current repo...')
-        const baselineValidation = await runValidationSteps(
-          validationCommands,
-          repoPath,
-          onLog,
-          onWarning,
-          { timeoutMs: testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, stageLabel: 'Pre-update validation' }
-        )
-        validationOutput.push(baselineValidation.output)
-        if (!baselineValidation.success) {
-          return fail('Pre-update validation failed. Update aborted before dependency changes.', {
-            testsPassed: false,
-            testOutput: baselineValidation.output
-          })
-        }
-        onLog('✓ Baseline validation passed')
-      }
+    if (nonBreakingBefore.length === 0 && effectiveSelectedMajorPackages.length === 0) {
+      return fail('No policy-approved non-breaking updates available and no allowed major packages selected.')
     }
 
     onProgress('Preparing isolated update workspace...', ++currentStep, totalSteps)
@@ -1099,12 +1430,43 @@ export async function runNonBreakingUpdatePipeline(
       })
     }
 
+    if (shouldRunTests) {
+      if (validationCommands.length === 0) {
+        onWarning({
+          message: 'No validation scripts found (test/lint/build). Continuing without pre/post validation checks.',
+          output: 'Define scripts in package.json to enable automated validation.'
+        })
+      } else {
+        onProgress('Running pre-update validation...', ++currentStep, totalSteps)
+        onLog('[1/5] Running validation on latest remote baseline...')
+        const baselineValidation = await runValidationSteps(
+          validationCommands,
+          workspacePath,
+          onLog,
+          onWarning,
+          { timeoutMs: effectiveTimeoutMs, stageLabel: 'Pre-update validation' }
+        )
+        validationOutput.push(baselineValidation.output)
+        if (!baselineValidation.success) {
+          return fail('Pre-update validation failed on latest remote baseline. Update aborted.', {
+            testsPassed: false,
+            testOutput: baselineValidation.output
+          })
+        }
+        onLog('✓ Pre-update validation passed')
+      }
+    }
+
     onProgress('Running non-breaking update sequence...', ++currentStep, totalSteps)
     onLog('[2/5] Running update script:')
-    onLog('rm -rf node_modules package-lock.json; npm install; npm update; rm -rf node_modules package-lock.json; npm install;')
+    const nonBreakingTargets = nonBreakingBefore.map(pkg => pkg.name)
+    const nonBreakingUpdateCommand = nonBreakingTargets.length > 0
+      ? `npm update ${nonBreakingTargets.join(' ')}`
+      : 'echo \"No auto-approved non-breaking updates\"'
+    onLog(`rm -rf node_modules package-lock.json; npm install; ${nonBreakingUpdateCommand}; rm -rf node_modules package-lock.json; npm install;`)
     try {
       const { stdout, stderr } = await runCommand(
-        'rm -rf node_modules package-lock.json; npm install; npm update; rm -rf node_modules package-lock.json; npm install;',
+        `rm -rf node_modules package-lock.json; npm install; ${nonBreakingUpdateCommand}; rm -rf node_modules package-lock.json; npm install;`,
         workspacePath,
         {
           timeout: 15 * 60 * 1000,
@@ -1119,10 +1481,17 @@ export async function runNonBreakingUpdatePipeline(
     }
 
     const majorUpdated: string[] = []
-    if (selectedMajorPackages.length > 0) {
+    if (effectiveSelectedMajorPackages.length > 0) {
       onProgress('Applying selected major updates...', ++currentStep, totalSteps)
       onLog('[3/5] Applying selected major updates...')
-      for (const pkg of selectedMajorPackages) {
+      for (const pkg of effectiveSelectedMajorPackages) {
+        if (effectivePinnedPackages[pkg]) {
+          onWarning({
+            message: `Skipping pinned package '${pkg}' (${effectivePinnedPackages[pkg]})`,
+            output: ''
+          })
+          continue
+        }
         try {
           onLog(`> npm install ${pkg}@latest`)
           const { stdout, stderr } = await runCommand(`npm install ${pkg}@latest`, workspacePath, {
@@ -1166,7 +1535,7 @@ export async function runNonBreakingUpdatePipeline(
         workspacePath,
         onLog,
         onWarning,
-        { timeoutMs: testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, stageLabel: 'Post-update validation' }
+        { timeoutMs: effectiveTimeoutMs, stageLabel: 'Post-update validation' }
       )
       validationOutput.push(postValidation.output)
       if (!postValidation.success) {
@@ -1189,10 +1558,28 @@ export async function runNonBreakingUpdatePipeline(
     if (!createPR) {
       onLog('[5/5] Committing updates locally...')
       onLog(`✓ Changes committed on '${safeBranchName}'`)
-      onLog(`✓ Ready to push: git push -u origin ${safeBranchName}`)
+      onProgress('Pushing branch...', ++currentStep, totalSteps)
+      await pushBranch(workspacePath, safeBranchName)
+      onLog(`✓ Branch pushed: ${safeBranchName}`)
+      const gateCheck = await warnOnGateFailures(
+        workspacePath,
+        onLog,
+        onWarning,
+        shouldRunTests ? 100 : null
+      )
+      await appendBridgeUpdateLog(repoPath, {
+        timestamp: new Date().toISOString(),
+        workflow: 'non-breaking',
+        branchName: safeBranchName,
+        updatedPackages,
+        createPR: false,
+        testsPassed: shouldRunTests ? true : undefined,
+        gatesPassed: gateCheck.passed
+      })
       return {
         success: true,
         branchName: safeBranchName,
+        branchPushed: true,
         updatedPackages,
         testsPassed: shouldRunTests ? true : undefined,
         testOutput: validationOutput.filter(Boolean).join('\n\n')
@@ -1215,6 +1602,22 @@ export async function runNonBreakingUpdatePipeline(
       ].join('\n')
     )
     deleteBranchOnCleanup = true
+    const gateCheck = await warnOnGateFailures(
+      workspacePath,
+      onLog,
+      onWarning,
+      shouldRunTests ? 100 : null
+    )
+    await appendBridgeUpdateLog(repoPath, {
+      timestamp: new Date().toISOString(),
+      workflow: 'non-breaking',
+      branchName: safeBranchName,
+      updatedPackages,
+      createPR: true,
+      prUrl,
+      testsPassed: shouldRunTests ? true : undefined,
+      gatesPassed: gateCheck.passed
+    })
 
     return {
       success: true,
@@ -1402,6 +1805,17 @@ export async function runSecurityPatchPipeline(
         testsPassed
       }
     }
+
+    await appendBridgeUpdateLog(repoPath, {
+      timestamp: new Date().toISOString(),
+      workflow: 'security',
+      branchName: safeBranchName,
+      updatedPackages,
+      failedPackages,
+      createPR,
+      prUrl,
+      testsPassed
+    })
 
     return {
       success: failedPackages.length === 0,

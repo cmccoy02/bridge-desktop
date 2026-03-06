@@ -26,7 +26,9 @@ import type {
   ConflictWarning,
   AppSettings,
   GitHubCliStatus,
-  BridgeProjectConfigResult
+  BridgeProjectConfigResult,
+  BridgeConfig,
+  TechDebtScore
 } from './index'
 
 declare global {
@@ -43,6 +45,10 @@ declare global {
       readDirectory: (path: string) => Promise<FileEntry[]>
       readFile: (path: string) => Promise<string>
       getBridgeProjectConfig: (repoPath: string) => Promise<BridgeProjectConfigResult>
+      loadBridgeConfig: (repoPath: string) => Promise<BridgeConfig>
+      generateBridgeConfig: (repoPath: string) => Promise<BridgeConfig>
+      saveBridgeConfig: (repoPath: string, config: BridgeConfig) => Promise<BridgeConfig>
+      getTechDebtScore: (repoPath: string) => Promise<TechDebtScore>
       detectLanguages: (path: string) => Promise<Language[]>
       getRepositories: () => Promise<Repository[]>
       saveRepositories: (repos: Repository[]) => Promise<boolean>

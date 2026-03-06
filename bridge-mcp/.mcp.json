@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bridge": {
+      "command": "node",
+      "args": ["/Users/connormccoy/Desktop/bridge-desktop/bridge-mcp/build/index.js"]
+    }
+  }
+}

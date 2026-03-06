@@ -27,6 +27,27 @@ import {
   sendScanToConsole,
   type ConsoleUploadResult
 } from './bridgeConsoleApi'
+import {
+  loadBridgeConfig,
+  generateDefaultConfig,
+  writeBridgeConfig,
+  type BridgeConfig
+} from './bridgeConfig'
+import {
+  calculateTechDebtScore,
+  type CodeHealthMetrics,
+  type ScanData,
+  type TechDebtScore
+} from './techDebtScorer'
+import {
+  generateScanReport,
+  writeScanReportArtifacts,
+  type BridgeScanReport
+} from './scanReport'
+import {
+  scanRepoForSecurityPatterns,
+  type SecurityPatternFinding
+} from './securityPatterns'
 
 const execAsync = promisify(exec)
 const scanStore = createBridgeStore('bridge-analysis')
@@ -44,6 +65,7 @@ export interface VulnerabilitySummary {
 export interface DependencyReport {
   outdated: OutdatedPackage[]
   vulnerabilities: VulnerabilitySummary
+  installedPackages?: string[]
   error?: string
 }
 
@@ -112,12 +134,24 @@ export interface FullScanResult {
   scanDate: string
   repository: string
   repositoryUrl?: string | null
+  config: BridgeConfig
   dependencies: DependencyReport
   circularDependencies: CircularDependencyReport
   deadCode: DeadCodeReport
   bundleSize: BundleAnalysisReport
   testCoverage: TestCoverageReport
   documentation: DocumentationDebtReport
+  securityPatterns: SecurityPatternFinding[]
+  oversizedFiles: OversizedComponent[]
+  codeHealth: CodeHealthMetrics
+  techDebtScore: TechDebtScore
+  scanReport?: BridgeScanReport
+  reportPaths?: {
+    latestReportPath: string
+    latestScorePath: string
+    archivePath: string
+    configSnapshotPath: string
+  }
   consoleUpload?: ConsoleUploadResult
   durationMs: number
 }
@@ -237,15 +271,278 @@ async function runCli(command: string, args: string[], cwd: string, timeoutMs = 
   }
 }
 
-function getScanHistory(repoPath: string): { bundleSize?: number } {
-  const history = scanStore.get(SCAN_HISTORY_KEY, {}) as Record<string, { bundleSize?: number }>
+function getScanHistory(repoPath: string): { bundleSize?: number; techDebtScore?: number } {
+  const history = scanStore.get(SCAN_HISTORY_KEY, {}) as Record<string, { bundleSize?: number; techDebtScore?: number }>
   return history[repoPath] || {}
 }
 
-function saveScanHistory(repoPath: string, data: { bundleSize?: number }): void {
-  const history = scanStore.get(SCAN_HISTORY_KEY, {}) as Record<string, { bundleSize?: number }>
+function saveScanHistory(repoPath: string, data: { bundleSize?: number; techDebtScore?: number }): void {
+  const history = scanStore.get(SCAN_HISTORY_KEY, {}) as Record<string, { bundleSize?: number; techDebtScore?: number }>
   history[repoPath] = { ...(history[repoPath] || {}), ...data }
   scanStore.set(SCAN_HISTORY_KEY, history)
+}
+
+async function getReadmeStats(repoPath: string): Promise<{ exists: boolean; wordCount: number; daysSinceUpdate: number }> {
+  const readmePath = path.join(repoPath, 'README.md')
+  try {
+    const [content, stats] = await Promise.all([
+      fs.readFile(readmePath, 'utf-8'),
+      fs.stat(readmePath)
+    ])
+    const words = content.trim().split(/\s+/).filter(Boolean).length
+    const daysSinceUpdate = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24)
+    return { exists: true, wordCount: words, daysSinceUpdate }
+  } catch {
+    return { exists: false, wordCount: 0, daysSinceUpdate: 999 }
+  }
+}
+
+async function getLockfileAgeDays(repoPath: string): Promise<number | null> {
+  const candidates = [
+    'package-lock.json',
+    'yarn.lock',
+    'pnpm-lock.yaml',
+    'poetry.lock',
+    'Pipfile.lock',
+    'Gemfile.lock',
+    'mix.lock',
+    'Cargo.lock'
+  ]
+
+  for (const candidate of candidates) {
+    try {
+      const stats = await fs.stat(path.join(repoPath, candidate))
+      return (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24)
+    } catch {
+      // Keep scanning candidates.
+    }
+  }
+
+  return null
+}
+
+async function getInstalledDependencyNames(repoPath: string): Promise<string[]> {
+  try {
+    const packageJsonPath = path.join(repoPath, 'package.json')
+    const raw = await fs.readFile(packageJsonPath, 'utf-8')
+    const pkg = JSON.parse(raw)
+    const names = new Set<string>()
+
+    for (const key of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+      const section = pkg?.[key]
+      if (section && typeof section === 'object') {
+        for (const name of Object.keys(section)) {
+          names.add(name)
+        }
+      }
+    }
+
+    return Array.from(names)
+  } catch {
+    return []
+  }
+}
+
+async function existsAt(repoPath: string, relativePath: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(repoPath, relativePath))
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function detectTestScript(repoPath: string): Promise<boolean> {
+  try {
+    const raw = await fs.readFile(path.join(repoPath, 'package.json'), 'utf-8')
+    const pkg = JSON.parse(raw)
+    return Boolean(pkg?.scripts?.test && String(pkg.scripts.test).trim())
+  } catch {
+    return false
+  }
+}
+
+async function detectCiConfig(repoPath: string): Promise<boolean> {
+  const candidates = [
+    '.github/workflows',
+    '.gitlab-ci.yml',
+    'circle.yml',
+    '.circleci/config.yml',
+    'azure-pipelines.yml',
+    'Jenkinsfile'
+  ]
+  for (const candidate of candidates) {
+    if (await existsAt(repoPath, candidate)) {
+      return true
+    }
+  }
+  return false
+}
+
+async function detectNodeModulesCommitted(repoPath: string): Promise<boolean> {
+  try {
+    const { stdout } = await execAsync('git ls-files node_modules', {
+      cwd: repoPath,
+      timeout: 20000
+    })
+    return stdout.trim().length > 0
+  } catch {
+    return false
+  }
+}
+
+async function collectPathDepthSignals(repoPath: string): Promise<{ maxNestingDepth: number; deeplyNestedFiles: number }> {
+  let maxNestingDepth = 0
+  let deeplyNestedFiles = 0
+  const ignoredDirs = new Set(['.git', 'node_modules', 'dist', 'build', '.next', 'coverage', '.bridge'])
+
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (ignoredDirs.has(entry.name)) continue
+        await walk(fullPath, depth + 1)
+      } else {
+        maxNestingDepth = Math.max(maxNestingDepth, depth)
+        if (depth > 6) {
+          deeplyNestedFiles += 1
+        }
+      }
+    }
+  }
+
+  await walk(repoPath, 0)
+  return { maxNestingDepth, deeplyNestedFiles }
+}
+
+async function computeCodeHealthMetrics(repoPath: string): Promise<CodeHealthMetrics> {
+  const metrics: CodeHealthMetrics = {
+    todoCount: 0,
+    consoleLogCount: 0,
+    commentedOutBlockCount: 0,
+    mixedTabsSpaces: false,
+    inconsistentQuoteStyle: false,
+    hasLinter: false,
+    hasFormatter: false,
+    packageScriptsCount: 0,
+    hasGitignore: false
+  }
+
+  const extensions = ['.js', '.jsx', '.ts', '.tsx', '.py', '.rb', '.go', '.java', '.rs', '.ex', '.exs']
+  const ignoredDirs = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.bridge'])
+  let singleQuoteCount = 0
+  let doubleQuoteCount = 0
+
+  metrics.hasGitignore = await existsAt(repoPath, '.gitignore')
+
+  try {
+    const packageJsonRaw = await fs.readFile(path.join(repoPath, 'package.json'), 'utf-8')
+    const packageJson = JSON.parse(packageJsonRaw)
+    metrics.packageScriptsCount = Object.keys(packageJson?.scripts || {}).length
+    const deps = { ...(packageJson?.dependencies || {}), ...(packageJson?.devDependencies || {}) }
+    metrics.hasLinter = Boolean(deps.eslint || deps['@typescript-eslint/eslint-plugin'] || packageJson?.scripts?.lint)
+    metrics.hasFormatter = Boolean(deps.prettier || deps.rome || packageJson?.scripts?.format)
+  } catch {
+    // non-node repos or unreadable package.json
+  }
+
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (ignoredDirs.has(entry.name)) continue
+        await walk(fullPath)
+      } else if (extensions.includes(path.extname(entry.name).toLowerCase())) {
+        const content = await fs.readFile(fullPath, 'utf-8').catch(() => '')
+        if (!content) continue
+
+        const todoMatches = content.match(/\b(TODO|FIXME|HACK)\b/g)
+        const consoleMatches = content.match(/console\.log\s*\(/g)
+        const commentedOutMatches = content.match(/^\s*\/\/\s*(if|for|while|function|class|const|let|var)\b/gm)
+        metrics.todoCount += todoMatches?.length || 0
+        metrics.consoleLogCount += consoleMatches?.length || 0
+        metrics.commentedOutBlockCount += commentedOutMatches?.length || 0
+
+        const hasTabs = /^\t+/m.test(content)
+        const hasSpaces = /^ {2,}/m.test(content)
+        if (hasTabs && hasSpaces) {
+          metrics.mixedTabsSpaces = true
+        }
+
+        singleQuoteCount += (content.match(/'[^'\n]*'/g) || []).length
+        doubleQuoteCount += (content.match(/"[^"\n]*"/g) || []).length
+      }
+    }
+  }
+
+  await walk(repoPath)
+  const quoteTotal = singleQuoteCount + doubleQuoteCount
+  if (quoteTotal > 0) {
+    const ratio = Math.abs(singleQuoteCount - doubleQuoteCount) / quoteTotal
+    metrics.inconsistentQuoteStyle = ratio < 0.6
+  }
+
+  return metrics
+}
+
+async function collectRepositoryInsights(
+  repoPath: string,
+  config: BridgeConfig
+): Promise<ScanData['repositoryInsights']> {
+  const existsAny = async (targets: string[]): Promise<boolean> => {
+    for (const target of targets) {
+      if (await existsAt(repoPath, target)) {
+        return true
+      }
+    }
+    return false
+  }
+
+  const [readmeStats, ciDetected, hasTestScript, pathSignals, nodeModulesCommitted, lockfileAgeDays] = await Promise.all([
+    getReadmeStats(repoPath),
+    detectCiConfig(repoPath),
+    detectTestScript(repoPath),
+    collectPathDepthSignals(repoPath),
+    detectNodeModulesCommitted(repoPath),
+    getLockfileAgeDays(repoPath)
+  ])
+
+  const hasLockfile = await existsAny([
+    'package-lock.json',
+    'yarn.lock',
+    'pnpm-lock.yaml',
+    'poetry.lock',
+    'Pipfile.lock',
+    'Gemfile.lock',
+    'mix.lock',
+    'Cargo.lock'
+  ])
+
+  const hasSrcDirectory = await existsAt(repoPath, 'src')
+  const hasChangelog = await existsAny(['CHANGELOG.md', 'changelog.md', 'CHANGELOG'])
+  const hasContributingGuide = await existsAny(['CONTRIBUTING.md', '.github/CONTRIBUTING.md'])
+  const hasLicense = await existsAny(['LICENSE', 'LICENSE.md', 'LICENSE.txt'])
+
+  return {
+    hasLockfile,
+    lockfileDaysSinceUpdate: lockfileAgeDays,
+    packageManagerDetected: Boolean(config.project.packageManager),
+    hasSrcDirectory,
+    ciDetected,
+    readmeExists: readmeStats.exists,
+    readmeWordCount: readmeStats.wordCount,
+    readmeDaysSinceUpdate: readmeStats.daysSinceUpdate,
+    hasChangelog,
+    hasContributingGuide,
+    hasLicense,
+    testCommandExists: Boolean(config.gates.tests.command || hasTestScript),
+    testsPass: null,
+    maxNestingDepth: pathSignals.maxNestingDepth,
+    deeplyNestedFiles: pathSignals.deeplyNestedFiles,
+    nodeModulesCommitted
+  }
 }
 
 // Find largest files in the repository
@@ -534,12 +831,14 @@ export async function analyzeDependencies(repoPath: string): Promise<DependencyR
       ? await getNpmAuditSummary(repoPath)
       : { critical: 0, high: 0, medium: 0, low: 0, total: 0 }
 
-    return { outdated, vulnerabilities }
+    const installedPackages = await getInstalledDependencyNames(repoPath)
+    return { outdated, vulnerabilities, installedPackages }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Dependency analysis failed'
     return {
       outdated: [],
       vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
+      installedPackages: [],
       error: message
     }
   }
@@ -890,36 +1189,139 @@ export async function runFullScan(
   options: { onProgress?: (message: string, step: number, total: number) => void; skipConsoleUpload?: boolean } = {}
 ): Promise<FullScanResult> {
   const startTime = Date.now()
-  const steps = [
-    { label: 'Analyzing dependencies' },
-    { label: 'Detecting circular dependencies' },
-    { label: 'Detecting dead code' },
-    { label: 'Analyzing bundle size' },
-    { label: 'Running test coverage' },
-    { label: 'Checking documentation' }
-  ]
-
-  const progress = (index: number) => {
-    options.onProgress?.(steps[index].label, index + 1, steps.length)
+  const configPath = path.join(repoPath, '.bridge.json')
+  let config = await loadBridgeConfig(repoPath)
+  try {
+    await fs.access(configPath)
+  } catch {
+    // First scan for this repository: generate and persist starter config.
+    const generated = await generateDefaultConfig(repoPath)
+    await writeBridgeConfig(repoPath, generated)
+    config = generated
   }
 
-  progress(0)
-  const dependencies = await analyzeDependencies(repoPath)
+  const featureFlags = config.scan.features
+  const steps: string[] = []
+  if (featureFlags.dependencies) steps.push('Analyzing dependencies')
+  if (featureFlags.circularDeps) steps.push('Detecting circular dependencies')
+  if (featureFlags.deadCode) steps.push('Detecting dead code')
+  if (featureFlags.bundleSize) steps.push('Analyzing bundle size')
+  if (featureFlags.testCoverage) steps.push('Running test coverage')
+  if (featureFlags.documentation) steps.push('Checking documentation')
+  if (featureFlags.security) steps.push('Scanning security code patterns')
+  if (featureFlags.fileAnalysis) steps.push('Collecting file architecture signals')
+  if (featureFlags.codeSmells) steps.push('Analyzing code health metrics')
+  if (steps.length === 0) {
+    steps.push('No enabled scan features; returning baseline report')
+  }
 
-  progress(1)
-  const circularDependencies = await detectCircularDependencies(repoPath)
+  let stepIndex = 0
+  const progress = (message: string) => {
+    stepIndex += 1
+    options.onProgress?.(message, stepIndex, steps.length)
+  }
 
-  progress(2)
-  const deadCode = await detectDeadCode(repoPath)
+  let dependencies: DependencyReport = {
+    outdated: [],
+    vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
+    installedPackages: []
+  }
+  if (featureFlags.dependencies) {
+    progress('Analyzing dependencies')
+    dependencies = await analyzeDependencies(repoPath)
+  }
 
-  progress(3)
-  const bundleSize = await analyzeBundleSize(repoPath)
+  let circularDependencies: CircularDependencyReport = { count: 0, dependencies: [] }
+  if (featureFlags.circularDeps) {
+    progress('Detecting circular dependencies')
+    circularDependencies = await detectCircularDependencies(repoPath)
+  }
 
-  progress(4)
-  const testCoverage = await analyzeTestCoverage(repoPath)
+  let deadCode: DeadCodeReport = { deadFiles: [], unusedExports: [], totalDeadCodeCount: 0 }
+  if (featureFlags.deadCode) {
+    progress('Detecting dead code')
+    deadCode = await detectDeadCode(repoPath)
+  }
 
-  progress(5)
-  const documentation = await detectDocumentationDebt(repoPath)
+  let bundleSize: BundleAnalysisReport = { totalSize: 0, totalSizeFormatted: formatSize(0), largestModules: [] }
+  if (featureFlags.bundleSize) {
+    progress('Analyzing bundle size')
+    bundleSize = await analyzeBundleSize(repoPath)
+  }
+
+  let testCoverage: TestCoverageReport = { coveragePercentage: null, uncoveredCriticalFiles: [] }
+  if (featureFlags.testCoverage) {
+    progress('Running test coverage')
+    testCoverage = await analyzeTestCoverage(repoPath)
+  }
+
+  let documentation: DocumentationDebtReport = {
+    missingReadmeSections: [],
+    readmeOutdated: false,
+    daysSinceUpdate: 0,
+    undocumentedFunctions: 0
+  }
+  if (featureFlags.documentation) {
+    progress('Checking documentation')
+    documentation = await detectDocumentationDebt(repoPath)
+  }
+
+  let securityPatterns: SecurityPatternFinding[] = []
+  if (featureFlags.security) {
+    progress('Scanning security code patterns')
+    securityPatterns = await scanRepoForSecurityPatterns(repoPath, {
+      exclude: config.scan.exclude,
+      maxFindings: 300
+    })
+  }
+
+  let oversizedFiles: OversizedComponent[] = []
+  if (featureFlags.fileAnalysis) {
+    progress('Collecting file architecture signals')
+    oversizedFiles = await findOversizedComponents(repoPath, 150)
+  }
+
+  let codeHealth: CodeHealthMetrics = {
+    todoCount: 0,
+    consoleLogCount: 0,
+    commentedOutBlockCount: 0,
+    mixedTabsSpaces: false,
+    inconsistentQuoteStyle: false,
+    hasLinter: false,
+    hasFormatter: false,
+    packageScriptsCount: 0,
+    hasGitignore: false
+  }
+  if (featureFlags.codeSmells) {
+    progress('Analyzing code health metrics')
+    codeHealth = await computeCodeHealthMetrics(repoPath)
+  }
+
+  const repositoryInsights = await collectRepositoryInsights(repoPath, config)
+  repositoryInsights.testsPass = null
+  repositoryInsights.oversizedFilesCount = oversizedFiles.length
+
+  const history = getScanHistory(repoPath)
+  const scanData: ScanData = {
+    dependencies,
+    vulnerabilities: dependencies.vulnerabilities,
+    circularDependencies,
+    deadCode,
+    bundleSize,
+    testCoverage,
+    documentation,
+    oversizedComponents: oversizedFiles,
+    securityPatterns,
+    codeHealth,
+    repositoryInsights,
+    previousScore: history.techDebtScore
+  }
+
+  const techDebtScore = await calculateTechDebtScore(repoPath, scanData, config)
+  saveScanHistory(repoPath, {
+    bundleSize: bundleSize.totalSize || history.bundleSize,
+    techDebtScore: techDebtScore.total
+  })
 
   let repositoryUrl: string | null | undefined = undefined
   try {
@@ -931,14 +1333,26 @@ export async function runFullScan(
     scanDate: new Date().toISOString(),
     repository: repoPath,
     repositoryUrl,
+    config,
     dependencies,
     circularDependencies,
     deadCode,
     bundleSize,
     testCoverage,
     documentation,
+    securityPatterns,
+    oversizedFiles,
+    codeHealth,
+    techDebtScore,
     durationMs: Date.now() - startTime
   }
+
+  const scanReport = await generateScanReport(repoPath, config, result, techDebtScore, {
+    patternFindings: securityPatterns,
+    oversizedFiles
+  })
+  result.scanReport = scanReport
+  result.reportPaths = await writeScanReportArtifacts(repoPath, scanReport)
 
   if (!options.skipConsoleUpload) {
     const settings = getBridgeConsoleSettings()
@@ -947,7 +1361,47 @@ export async function runFullScan(
     }
   }
 
+  try {
+    const gitignoreRaw = await fs.readFile(path.join(repoPath, '.gitignore'), 'utf-8')
+    if (!gitignoreRaw.split(/\r?\n/).some(line => line.trim() === '.bridge/' || line.trim() === '.bridge')) {
+      console.log(`[Bridge] Consider adding '.bridge/' to ${repoPath}/.gitignore`) // eslint-disable-line no-console
+    }
+  } catch {
+    console.log(`[Bridge] Consider adding '.bridge/' to ${repoPath}/.gitignore`) // eslint-disable-line no-console
+  }
+
   return result
+}
+
+export async function loadRepositoryBridgeConfig(repoPath: string): Promise<BridgeConfig> {
+  return loadBridgeConfig(repoPath)
+}
+
+export async function generateRepositoryBridgeConfig(repoPath: string): Promise<BridgeConfig> {
+  const config = await generateDefaultConfig(repoPath)
+  await writeBridgeConfig(repoPath, config)
+  return config
+}
+
+export async function saveRepositoryBridgeConfig(repoPath: string, config: BridgeConfig): Promise<BridgeConfig> {
+  await writeBridgeConfig(repoPath, config)
+  return loadBridgeConfig(repoPath)
+}
+
+export async function getLatestTechDebtScore(repoPath: string): Promise<TechDebtScore> {
+  const scorePath = path.join(repoPath, '.bridge', 'latest-score.json')
+  try {
+    const raw = await fs.readFile(scorePath, 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (typeof parsed?.total === 'number' && parsed?.dimensions) {
+      return parsed as TechDebtScore
+    }
+  } catch {
+    // Fallback to fresh scan below.
+  }
+
+  const scan = await runFullScan(repoPath, { skipConsoleUpload: true })
+  return scan.techDebtScore
 }
 
 export async function deleteDeadFile(repoPath: string, relativePath: string): Promise<boolean> {

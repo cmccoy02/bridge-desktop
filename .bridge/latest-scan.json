@@ -1,0 +1,117 @@
+{
+  "outdated": [],
+  "vulnerabilities": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "total": 0
+  },
+  "fileStats": {
+    "totalFiles": 85,
+    "totalLines": 64283,
+    "largestFiles": [
+      {
+        "path": "repomix-output.md",
+        "lines": 43072
+      },
+      {
+        "path": "sandbox/fixtures/large-fixture.json",
+        "lines": 2003
+      },
+      {
+        "path": "electron/services/patchBatch.ts",
+        "lines": 1838
+      },
+      {
+        "path": "electron/services/analysis.ts",
+        "lines": 1482
+      },
+      {
+        "path": "src/index.css",
+        "lines": 1175
+      },
+      {
+        "path": "electron/preload.ts",
+        "lines": 921
+      },
+      {
+        "path": "src/components/PatchBatch/PatchBatch.tsx",
+        "lines": 823
+      },
+      {
+        "path": "bridge-mcp/src/core/bridgeConfig.ts",
+        "lines": 807
+      },
+      {
+        "path": "electron/main.ts",
+        "lines": 694
+      },
+      {
+        "path": "src/components/Scheduler/Scheduler.tsx",
+        "lines": 680
+      },
+      {
+        "path": "src/types/index.ts",
+        "lines": 638
+      },
+      {
+        "path": "src/components/FullScan/FullScan.tsx",
+        "lines": 604
+      },
+      {
+        "path": "bridge-mcp/src/core/repoAnalyzer.ts",
+        "lines": 583
+      },
+      {
+        "path": "bridge-mcp/src/core/scorer.ts",
+        "lines": 546
+      },
+      {
+        "path": "electron/services/scheduler.ts",
+        "lines": 523
+      }
+    ]
+  },
+  "hasTests": false,
+  "hasTestFiles": false,
+  "testCommand": null,
+  "hasLinter": false,
+  "todoCount": 54,
+  "circularDeps": 0,
+  "languages": [
+    "TypeScript",
+    "JSON",
+    "Markdown",
+    "JavaScript"
+  ],
+  "hasCoverageData": false,
+  "readmeExists": true,
+  "readmeWordCount": 415,
+  "dependencyNames": [
+    "dependency-cruiser",
+    "electron-store",
+    "knip",
+    "nyc",
+    "react",
+    "react-dom",
+    "remark",
+    "remark-lint",
+    "semver",
+    "unimported",
+    "vis-network",
+    "webpack-bundle-analyzer",
+    "@types/node",
+    "@types/react",
+    "@types/react-dom",
+    "@types/semver",
+    "@vitejs/plugin-react",
+    "@electron/notarize",
+    "electron",
+    "electron-builder",
+    "typescript",
+    "vite",
+    "vite-plugin-electron",
+    "vite-plugin-electron-renderer"
+  ]
+}

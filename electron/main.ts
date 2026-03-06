@@ -15,7 +15,11 @@ import {
   runFullScan,
   deleteDeadFile,
   cleanupDeadCode,
-  detectDeadCode
+  detectDeadCode,
+  loadRepositoryBridgeConfig,
+  generateRepositoryBridgeConfig,
+  saveRepositoryBridgeConfig,
+  getLatestTechDebtScore
 } from './services/analysis'
 import {
   getBridgeConsoleSettings,
@@ -265,6 +269,22 @@ ipcMain.handle('get-bridge-project-config', async (_, repoPath: string) => {
   return await loadBridgeProjectConfig(repoPath)
 })
 
+ipcMain.handle('load-bridge-config', async (_, repoPath: string) => {
+  return await loadRepositoryBridgeConfig(repoPath)
+})
+
+ipcMain.handle('generate-bridge-config', async (_, repoPath: string) => {
+  return await generateRepositoryBridgeConfig(repoPath)
+})
+
+ipcMain.handle('save-bridge-config', async (_, repoPath: string, config: any) => {
+  return await saveRepositoryBridgeConfig(repoPath, config)
+})
+
+ipcMain.handle('get-tech-debt-score', async (_, repoPath: string) => {
+  return await getLatestTechDebtScore(repoPath)
+})
+
 ipcMain.handle('detect-languages', async (_, repoPath: string) => {
   return await detectLanguages(repoPath)
 })
@@ -430,20 +450,59 @@ ipcMain.handle('run-patch-batch', async (event, config: {
     testTimeoutMs
   } = config
 
+  const bridgeConfig = await loadRepositoryBridgeConfig(repoPath)
+  const projectConfig = await loadBridgeProjectConfig(repoPath)
+  const updatePolicy = bridgeConfig.dependencies.updatePolicy
+  const pinnedPackages = bridgeConfig.dependencies.pinnedPackages || {}
+  const outdatedPackages = await collectOutdatedPackages(repoPath)
+  const outdatedIndex = new Map(outdatedPackages.map(pkg => [`${pkg.language}:${pkg.name}`, pkg]))
+
+  const skippedPinned: string[] = []
+  const filteredPackages = packages.filter(pkg => {
+    if (pinnedPackages[pkg.name]) {
+      skippedPinned.push(pkg.name)
+      return false
+    }
+
+    const lookup = outdatedIndex.get(`${pkg.language}:${pkg.name}`)
+    if (!lookup || pkg.language !== 'javascript') {
+      return true
+    }
+
+    if (lookup.updateType === 'patch' && updatePolicy.patch === 'ignore') return false
+    if (lookup.updateType === 'minor' && updatePolicy.minor === 'ignore') return false
+    if (lookup.updateType === 'major' && updatePolicy.major === 'ignore') return false
+    return true
+  })
+
+  if (skippedPinned.length > 0) {
+    event.sender.send('patch-batch-warning', {
+      message: `Skipped pinned packages from .bridge.json: ${Array.from(new Set(skippedPinned)).join(', ')}`,
+      output: ''
+    })
+  }
+
+  if (filteredPackages.length === 0) {
+    return {
+      success: false,
+      error: 'No packages remain after applying .bridge.json policy and pinned package constraints.'
+    }
+  }
+
   return runPatchBatchPipeline(
     {
       repoPath,
       branchName,
-      packages,
+      packages: filteredPackages,
       createPR,
-      runTests: shouldRunTests,
+      runTests: shouldRunTests ?? bridgeConfig.gates.tests.required,
       baseBranch: config.baseBranch,
       remoteFirst: config.remoteFirst,
       updateStrategy,
       prTitle,
       prBody,
-      testCommand,
-      testTimeoutMs
+      testCommand: testCommand?.trim() || bridgeConfig.gates.tests.command || projectConfig.config.patch?.testCommand,
+      testTimeoutMs: testTimeoutMs ?? bridgeConfig.gates.tests.timeout
     },
     {
       onProgress: (message, step, total) => event.sender.send('patch-batch-progress', { message, step, total }),
@@ -466,18 +525,34 @@ ipcMain.handle('run-non-breaking-update', async (event, config: {
   prTitle?: string
   prBody?: string
 }) => {
+  const bridgeConfig = await loadRepositoryBridgeConfig(config.repoPath)
   const projectConfig = await loadBridgeProjectConfig(config.repoPath)
   const patchConfig = projectConfig.config.patch || {}
   const branchPrefix = patchConfig.branchPrefix || projectConfig.config.branchPrefix || 'bridge-update-deps'
   const branchName = config.branchName?.trim() || `${branchPrefix}-${Date.now()}`
+  const updatePolicy = bridgeConfig.dependencies.updatePolicy
+  const pinnedPackages = bridgeConfig.dependencies.pinnedPackages || {}
+  const selectedMajor = updatePolicy.major === 'ignore'
+    ? []
+    : (config.selectedMajorPackages || []).filter(pkg => !pinnedPackages[pkg])
+  const skippedPinned = (config.selectedMajorPackages || []).filter(pkg => Boolean(pinnedPackages[pkg]))
+
+  if (skippedPinned.length > 0) {
+    event.sender.send('patch-batch-warning', {
+      message: `Skipped pinned major packages from .bridge.json: ${Array.from(new Set(skippedPinned)).join(', ')}`,
+      output: ''
+    })
+  }
 
   return runNonBreakingUpdatePipeline(
     {
       ...config,
       branchName,
-      createPR: config.createPR ?? patchConfig.createPR ?? true,
-      runTests: config.runTests ?? patchConfig.runTests ?? true,
-      testCommand: config.testCommand?.trim() || patchConfig.testCommand,
+      createPR: config.createPR ?? patchConfig.createPR ?? false,
+      runTests: config.runTests ?? patchConfig.runTests ?? bridgeConfig.gates.tests.required,
+      selectedMajorPackages: selectedMajor,
+      testCommand: config.testCommand?.trim() || bridgeConfig.gates.tests.command || patchConfig.testCommand,
+      testTimeoutMs: config.testTimeoutMs ?? bridgeConfig.gates.tests.timeout,
       baseBranch: config.baseBranch || patchConfig.baseBranch || projectConfig.config.baseBranch,
       remoteFirst: config.remoteFirst ?? patchConfig.remoteFirst ?? true
     },
@@ -498,8 +573,18 @@ ipcMain.handle('run-security-patch', async (event, config: {
   remoteFirst?: boolean
   testCommand?: string
 }) => {
+  const bridgeConfig = await loadRepositoryBridgeConfig(config.repoPath)
+  const projectConfig = await loadBridgeProjectConfig(config.repoPath)
+  const patchConfig = projectConfig.config.patch || {}
+
   return runSecurityPatchPipeline(
-    config,
+    {
+      ...config,
+      runTests: config.runTests ?? patchConfig.runTests ?? bridgeConfig.gates.tests.required,
+      testCommand: config.testCommand?.trim() || bridgeConfig.gates.tests.command || patchConfig.testCommand,
+      baseBranch: config.baseBranch || patchConfig.baseBranch || projectConfig.config.baseBranch,
+      remoteFirst: config.remoteFirst ?? patchConfig.remoteFirst ?? true
+    },
     {
       onProgress: (message, step, total) => event.sender.send('security-patch-progress', { message, step, total }),
       onLog: (message) => event.sender.send('security-patch-log', { message })

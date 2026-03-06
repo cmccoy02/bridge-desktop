@@ -2,6 +2,7 @@ import { exec, spawn, ChildProcess } from 'child_process'
 import { promisify } from 'util'
 import path from 'path'
 import fs from 'fs/promises'
+import { scanRepoForSecurityPatterns, type SecurityPatternFinding } from './securityPatterns'
 
 const execAsync = promisify(exec)
 
@@ -68,16 +69,46 @@ export async function runSecurityScan(
   })
 
   try {
-    // Check if agentic_fixer is available
     const available = await checkAgenticFixerAvailable()
+    const baseResult = available
+      ? await runPythonSecurityScan(repoPath, scanId, startTime, onProgress)
+      : await runBasicSecurityScan(repoPath, scanId, onProgress)
 
-    if (!available) {
-      // Fall back to basic pattern detection
-      return await runBasicSecurityScan(repoPath, scanId, onProgress)
+    onProgress?.({
+      status: 'analyzing',
+      progress: 75,
+      message: 'Running TypeScript security pattern scanner...'
+    })
+
+    const [tsPatternFindings, auditFindings] = await Promise.all([
+      scanRepoForSecurityPatterns(repoPath, { maxFindings: 250 }),
+      getNpmAuditSecurityFindings(repoPath)
+    ])
+
+    const mergedFindings = dedupeFindings([
+      ...baseResult.findings,
+      ...tsPatternFindings.map(mapPatternFinding),
+      ...auditFindings
+    ])
+
+    const result: ScanResult = {
+      ...baseResult,
+      findings: mergedFindings,
+      totalFindings: mergedFindings.length,
+      criticalCount: mergedFindings.filter(item => item.severity === 'critical').length,
+      highCount: mergedFindings.filter(item => item.severity === 'high').length,
+      mediumCount: mergedFindings.filter(item => item.severity === 'medium').length,
+      lowCount: mergedFindings.filter(item => item.severity === 'low').length,
+      duration: Date.now() - startTime
     }
 
-    // Run the Python security scanner
-    return await runPythonSecurityScan(repoPath, scanId, startTime, onProgress)
+    onProgress?.({
+      status: 'complete',
+      progress: 100,
+      message: `Found ${result.totalFindings} security issues`
+    })
+
+    return result
   } catch (error) {
     console.error('Security scan failed:', error)
     throw error
@@ -316,6 +347,81 @@ function normalizeSeverity(severity: string): 'critical' | 'high' | 'medium' | '
   if (s === 'high' || s === 'warning') return 'high'
   if (s === 'medium' || s === 'info') return 'medium'
   return 'low'
+}
+
+function mapPatternFinding(finding: SecurityPatternFinding): SecurityFinding {
+  return {
+    file: finding.file,
+    line: finding.line,
+    issue: finding.category,
+    severity: finding.severity,
+    code: finding.snippet,
+    description: finding.description,
+    cwe: finding.cwe || 'CWE-Unknown',
+    owasp: finding.owasp || 'Unknown',
+    solution: finding.suggestion
+  }
+}
+
+function dedupeFindings(findings: SecurityFinding[]): SecurityFinding[] {
+  const seen = new Set<string>()
+  const output: SecurityFinding[] = []
+  for (const finding of findings) {
+    const key = `${finding.file}:${finding.line}:${finding.issue}:${finding.severity}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    output.push(finding)
+  }
+  return output
+}
+
+async function getNpmAuditSecurityFindings(repoPath: string): Promise<SecurityFinding[]> {
+  try {
+    const { stdout } = await execAsync('npm audit --json', {
+      cwd: repoPath,
+      timeout: 120000,
+      maxBuffer: 20 * 1024 * 1024
+    })
+    const payload = JSON.parse(stdout || '{}')
+    const findings: SecurityFinding[] = []
+
+    if (payload.vulnerabilities && typeof payload.vulnerabilities === 'object') {
+      for (const [name, meta] of Object.entries(payload.vulnerabilities) as [string, any][]) {
+        const severity = normalizeSeverity(String(meta?.severity || 'low'))
+        findings.push({
+          file: 'package-lock.json',
+          line: 1,
+          issue: `dependency-vulnerability:${name}`,
+          severity,
+          code: name,
+          description: `${severity.toUpperCase()} vulnerability reported for ${name}.`,
+          cwe: 'CWE-937',
+          owasp: 'A06:2021'
+        })
+      }
+    }
+
+    if (payload.advisories && typeof payload.advisories === 'object') {
+      for (const advisory of Object.values(payload.advisories) as any[]) {
+        const severity = normalizeSeverity(String(advisory?.severity || 'low'))
+        const moduleName = String(advisory?.module_name || 'unknown')
+        findings.push({
+          file: 'package-lock.json',
+          line: 1,
+          issue: `dependency-advisory:${moduleName}`,
+          severity,
+          code: moduleName,
+          description: `${severity.toUpperCase()} advisory for ${moduleName}.`,
+          cwe: 'CWE-937',
+          owasp: 'A06:2021'
+        })
+      }
+    }
+
+    return dedupeFindings(findings)
+  } catch {
+    return []
+  }
 }
 
 export async function generateSecurityFix(finding: SecurityFinding): Promise<string | null> {

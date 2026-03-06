@@ -1,0 +1,71 @@
+{
+  "repo_name": "bridge-desktop",
+  "scanned_at": "2026-03-05T23:50:34.661Z",
+  "debt_score": 31,
+  "grade": "C",
+  "has_bridge_config": true,
+  "critical_issues": [
+    "No test command found in package.json scripts.",
+    "Gate failing: tests-exist"
+  ],
+  "top_actions": [
+    {
+      "title": "No test command found",
+      "impact": 40,
+      "automatable": true
+    },
+    {
+      "title": "No test files detected",
+      "impact": 30,
+      "automatable": true
+    },
+    {
+      "title": "No linter configured",
+      "impact": 10,
+      "automatable": true
+    },
+    {
+      "title": "TODO/FIXME/HACK markers exceed 10 (54)",
+      "impact": 10,
+      "automatable": false
+    },
+    {
+      "title": "TODO/FIXME/HACK markers exceed 30 (54)",
+      "impact": 10,
+      "automatable": false
+    }
+  ],
+  "conventions": [
+    "Use strict TypeScript - avoid any types",
+    "Prefer named exports over default exports",
+    "Use async/await over raw Promise chaining",
+    "Use functional components with hooks",
+    "Co-locate component tests with component files"
+  ],
+  "avoid": [
+    "Do not use @ts-ignore without explanation",
+    "Do not disable ESLint rules inline without justification",
+    "Do not use class components"
+  ],
+  "preferred_libraries": {
+    "dates": "date-fns",
+    "validation": "zod"
+  },
+  "banned_packages": [],
+  "pinned_packages": {},
+  "update_policy": {
+    "patch": "auto",
+    "minor": "review",
+    "major": "review"
+  },
+  "outdated_summary": {
+    "total": 0,
+    "patch": 0,
+    "minor": 0,
+    "major": 0
+  },
+  "gates_passing": false,
+  "failing_gates": [
+    "tests-exist"
+  ]
+}
