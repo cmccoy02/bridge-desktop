@@ -577,8 +577,45 @@ code, pre {
   font-family: var(--font-mono);
 }
 
+.output-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.output-filter {
+  width: 120px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.output-checkbox {
+  margin-right: 4px;
+}
+
 .output-line {
   white-space: pre-wrap;
+  padding: 2px 0;
+}
+
+.output-time {
+  color: #8f8f8f;
+}
+
+.output-info {
+  color: #e5e5e5;
+}
+
+.output-warn {
+  color: #f5a623;
+}
+
+.output-error {
+  color: #ff6b6b;
+}
+
+.output-success {
+  color: #5ad48a;
 }
 
 /* Input */

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRepositories } from '../../contexts/RepositoryContext'
 import type { BridgeConfig, BridgeProjectConfigResult, OutdatedPackage, PatchBatchResult } from '../../types'
 import Scheduler from '../Scheduler/Scheduler'
@@ -16,7 +16,15 @@ export default function PatchBatch() {
 
   const [branchName, setBranchName] = useState('bridge-update-deps')
   const [repoInfo, setRepoInfo] = useState<{ branch: string; isProtectedBranch: boolean } | null>(null)
-  const [outputLines, setOutputLines] = useState<string[]>([])
+  const [outputEntries, setOutputEntries] = useState<Array<{
+    id: number
+    message: string
+    level: 'info' | 'warn' | 'error' | 'success'
+    timestamp: string
+  }>>([])
+  const [outputFilter, setOutputFilter] = useState<'all' | 'warn' | 'error'>('all')
+  const [autoScrollOutput, setAutoScrollOutput] = useState(true)
+  const outputPanelRef = useRef<HTMLDivElement | null>(null)
   const [testCommand, setTestCommand] = useState('')
   const [testCommandDetected, setTestCommandDetected] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -65,7 +73,39 @@ export default function PatchBatch() {
       return a.name.localeCompare(b.name)
     })
   }, [packages])
+  const filteredOutputEntries = useMemo(() => {
+    if (outputFilter === 'all') return outputEntries
+    return outputEntries.filter(entry => entry.level === outputFilter)
+  }, [outputEntries, outputFilter])
   const selectedPackageCount = nonBreakingPackages.length + selectedReviewPackages.size
+
+  const classifyOutputLevel = (message: string): 'info' | 'warn' | 'error' | 'success' => {
+    const normalized = message.trim().toLowerCase()
+    if (normalized.startsWith('warn:')) return 'warn'
+    if (
+      normalized.startsWith('error:') ||
+      normalized.includes('✗') ||
+      normalized.includes(' failed') ||
+      normalized.includes('fatal:')
+    ) {
+      return 'error'
+    }
+    if (normalized.includes('✓') || normalized.includes('success')) return 'success'
+    return 'info'
+  }
+
+  const appendOutputLine = (message: string) => {
+    const timestamp = new Date().toLocaleTimeString([], { hour12: false })
+    setOutputEntries(prev => [
+      ...prev,
+      {
+        id: Date.now() + prev.length,
+        message,
+        level: classifyOutputLevel(message),
+        timestamp
+      }
+    ])
+  }
 
   const getUpdateTypeBadgeClass = (updateType: OutdatedPackage['updateType']) => {
     switch (updateType) {
@@ -92,11 +132,14 @@ export default function PatchBatch() {
   useEffect(() => {
     const cleanupProgress = window.bridge.onPatchBatchProgress(setProgress)
     const cleanupLog = window.bridge.onPatchBatchLog(({ message }) => {
-      setOutputLines(prev => [...prev, message])
+      appendOutputLine(message)
     })
     const cleanupWarning = window.bridge.onPatchBatchWarning(({ message, output }) => {
       const lines = output ? output.split(/\r?\n/).filter(line => line.trim()) : []
-      setOutputLines(prev => [...prev, `WARN: ${message}`, ...lines])
+      appendOutputLine(`WARN: ${message}`)
+      for (const line of lines) {
+        appendOutputLine(line)
+      }
     })
 
     return () => {
@@ -105,6 +148,11 @@ export default function PatchBatch() {
       cleanupWarning()
     }
   }, [])
+
+  useEffect(() => {
+    if (!autoScrollOutput || !outputPanelRef.current) return
+    outputPanelRef.current.scrollTop = outputPanelRef.current.scrollHeight
+  }, [autoScrollOutput, outputEntries])
 
   const loadRepoInfo = async () => {
     if (!selectedRepo) return
@@ -180,13 +228,20 @@ export default function PatchBatch() {
       }
 
       const fileNames = new Set(files.map(file => file.name))
+      const declaredManager = String(packageJson?.packageManager || '').toLowerCase()
       let packageManager = 'npm'
-      if (fileNames.has('package-lock.json')) {
+      if (declaredManager.startsWith('pnpm@')) {
+        packageManager = 'pnpm'
+      } else if (declaredManager.startsWith('yarn@')) {
+        packageManager = 'yarn'
+      } else if (declaredManager.startsWith('npm@')) {
         packageManager = 'npm'
       } else if (fileNames.has('pnpm-lock.yaml')) {
         packageManager = 'pnpm'
       } else if (fileNames.has('yarn.lock')) {
         packageManager = 'yarn'
+      } else if (fileNames.has('package-lock.json')) {
+        packageManager = 'npm'
       }
 
       setTestCommand(`${packageManager} test`)
@@ -284,7 +339,7 @@ export default function PatchBatch() {
     setProgress(null)
     setResult(null)
     setDependencyDebtDelta(null)
-    setOutputLines([])
+    setOutputEntries([])
     const beforeDependencyDebt = estimateDependencyDebt(packages)
 
     try {
@@ -431,6 +486,9 @@ export default function PatchBatch() {
           </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '10px' }}>
             Runs: pull latest → tests → clean install/update script → tests → commit → push.
+          </p>
+          <p style={{ color: 'var(--text-tertiary)', fontSize: '12px', marginBottom: '10px' }}>
+            Auto-selected packages are non-breaking updates within your current version ranges (`current → wanted`). Additional `current → latest` updates may require range changes and are left for manual review.
           </p>
           {nonBreakingPackages.length === 0 && majorPackages.length > 0 && (
             <div style={{ color: 'var(--warning)', fontSize: '12px', marginBottom: '10px' }}>
@@ -639,13 +697,53 @@ export default function PatchBatch() {
       <div className="card">
         <div className="card-header">
           <h3 className="card-title">Live Output</h3>
+          <div className="output-toolbar">
+            <select
+              className="input output-filter"
+              value={outputFilter}
+              onChange={e => setOutputFilter(e.target.value as 'all' | 'warn' | 'error')}
+            >
+              <option value="all">All</option>
+              <option value="warn">Warnings</option>
+              <option value="error">Errors</option>
+            </select>
+            <label className="simple-checkbox output-checkbox">
+              <input
+                type="checkbox"
+                checked={autoScrollOutput}
+                onChange={e => setAutoScrollOutput(e.target.checked)}
+              />
+              <span className="checkbox-label">Auto-scroll</span>
+            </label>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={async () => {
+                const text = outputEntries.map(entry => `[${entry.timestamp}] ${entry.message}`).join('\n')
+                await navigator.clipboard.writeText(text)
+              }}
+              disabled={outputEntries.length === 0}
+            >
+              Copy
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setOutputEntries([])}
+              disabled={outputEntries.length === 0}
+            >
+              Clear
+            </button>
+          </div>
         </div>
-        <div className="output-panel">
-          {outputLines.length === 0 ? (
+        <div className="output-panel" ref={outputPanelRef}>
+          {outputEntries.length === 0 ? (
             <div style={{ color: 'var(--text-tertiary)' }}>No output yet. Run an update to see progress here.</div>
+          ) : filteredOutputEntries.length === 0 ? (
+            <div style={{ color: 'var(--text-tertiary)' }}>No lines match this filter.</div>
           ) : (
-            outputLines.map((line, index) => (
-              <div key={`${line}-${index}`} className="output-line">{line}</div>
+            filteredOutputEntries.map(entry => (
+              <div key={entry.id} className={`output-line output-${entry.level}`}>
+                <span className="output-time">[{entry.timestamp}]</span> {entry.message}
+              </div>
             ))
           )}
         </div>

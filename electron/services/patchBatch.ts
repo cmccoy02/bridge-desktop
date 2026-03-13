@@ -143,6 +143,39 @@ function extractFailureSummary(output: string): string | null {
   return lines[lines.length - 1].slice(0, 220)
 }
 
+function detectValidationEnvironmentIssue(output: string): string | null {
+  const checks: Array<{ pattern: RegExp; reason: string }> = [
+    {
+      pattern: /spawn pnpm ENOENT/i,
+      reason: 'test script requires pnpm but pnpm is not installed or not available in PATH'
+    },
+    {
+      pattern: /spawn yarn ENOENT/i,
+      reason: 'test script requires yarn but yarn is not installed or not available in PATH'
+    },
+    {
+      pattern: /spawn npm ENOENT/i,
+      reason: 'test script requires npm but npm is not available in PATH'
+    },
+    {
+      pattern: /command not found:\s*pnpm/i,
+      reason: 'pnpm is not installed or not available in PATH'
+    },
+    {
+      pattern: /command not found:\s*yarn/i,
+      reason: 'yarn is not installed or not available in PATH'
+    }
+  ]
+
+  for (const check of checks) {
+    if (check.pattern.test(output)) {
+      return check.reason
+    }
+  }
+
+  return null
+}
+
 function extractFailureFingerprints(output: string): Set<string> {
   const lines = splitOutputLines(output)
   const fingerprints = new Set<string>()
@@ -245,6 +278,7 @@ async function runCommand(
 
 type PackageManager = 'npm' | 'yarn' | 'pnpm'
 type ValidationStage = 'test' | 'lint' | 'build'
+type TestFramework = 'vitest' | 'jest' | 'mocha' | 'ava' | 'playwright'
 
 interface ValidationStep {
   command: string
@@ -268,22 +302,44 @@ function normalizeConfiguredTimeoutMs(rawTimeout: unknown): number | null {
 }
 
 async function detectNodePackageManager(repoPath: string): Promise<PackageManager> {
+  const declared = await readDeclaredPackageManager(repoPath)
+  if (declared) {
+    return declared
+  }
+
+  const hasNpmLock = await fileExists(path.join(repoPath, 'package-lock.json'))
   const hasPnpmLock = await fileExists(path.join(repoPath, 'pnpm-lock.yaml'))
   const hasYarnLock = await fileExists(path.join(repoPath, 'yarn.lock'))
 
-  if (hasPnpmLock && await isCommandAvailable('pnpm', repoPath)) {
+  if (hasPnpmLock) {
     return 'pnpm'
   }
-  if (hasYarnLock && await isCommandAvailable('yarn', repoPath)) {
+  if (hasYarnLock) {
     return 'yarn'
   }
-
-  // Fallback for environments where pnpm/yarn lockfiles exist but the binary is not installed.
-  if (hasPnpmLock || hasYarnLock) {
+  if (hasNpmLock) {
     return 'npm'
   }
 
   return 'npm'
+}
+
+async function readDeclaredPackageManager(repoPath: string): Promise<PackageManager | null> {
+  const packageJsonPath = path.join(repoPath, 'package.json')
+  if (!(await fileExists(packageJsonPath))) {
+    return null
+  }
+  try {
+    const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'))
+    const value = String(packageJson?.packageManager || '').trim().toLowerCase()
+    if (!value) return null
+    if (value.startsWith('pnpm@')) return 'pnpm'
+    if (value.startsWith('yarn@')) return 'yarn'
+    if (value.startsWith('npm@')) return 'npm'
+    return null
+  } catch {
+    return null
+  }
 }
 
 async function isCommandAvailable(command: string, cwd: string): Promise<boolean> {
@@ -296,6 +352,24 @@ async function isCommandAvailable(command: string, cwd: string): Promise<boolean
   } catch {
     return false
   }
+}
+
+async function resolvePackageManagerCommand(repoPath: string, manager: PackageManager): Promise<string> {
+  if (manager === 'npm') {
+    return 'npm'
+  }
+
+  if (await isCommandAvailable(manager, repoPath)) {
+    return manager
+  }
+
+  if (await isCommandAvailable('corepack', repoPath)) {
+    return `corepack ${manager}`
+  }
+
+  throw new Error(
+    `Repository uses ${manager}, but '${manager}' is not installed and 'corepack' is unavailable. Install ${manager} (or enable corepack) and retry.`
+  )
 }
 
 async function normalizeConfiguredValidationCommand(repoPath: string, command: string | undefined): Promise<string | undefined> {
@@ -311,6 +385,12 @@ async function normalizeConfiguredValidationCommand(repoPath: string, command: s
   const available = await isCommandAvailable(runner, repoPath)
   if (available) {
     return trimmed
+  }
+
+  const hasCorepack = await isCommandAvailable('corepack', repoPath)
+  if (hasCorepack) {
+    const rest = tokens.slice(1).join(' ')
+    return `corepack ${runner}${rest ? ` ${rest}` : ''}`.trim()
   }
 
   const subcommand = tokens[1] || ''
@@ -339,34 +419,30 @@ function isMissingCommandOutput(output: string): boolean {
   )
 }
 
-function getScriptCommand(packageManager: PackageManager, scriptName: string): string {
+function getScriptCommand(packageManager: PackageManager, managerCommand: string, scriptName: string): string {
   if (packageManager === 'yarn') {
-    return scriptName === 'test' ? 'yarn test' : `yarn ${scriptName}`
+    return scriptName === 'test' ? `${managerCommand} test` : `${managerCommand} ${scriptName}`
   }
   if (packageManager === 'pnpm') {
-    return scriptName === 'test' ? 'pnpm test' : `pnpm run ${scriptName}`
+    return scriptName === 'test' ? `${managerCommand} test` : `${managerCommand} run ${scriptName}`
   }
-  return scriptName === 'test' ? 'npm test' : `npm run ${scriptName}`
+  return scriptName === 'test' ? `${managerCommand} test` : `${managerCommand} run ${scriptName}`
 }
 
-function getNonBreakingUpdateCommand(packageManager: PackageManager, targets: string[]): string {
-  if (targets.length === 0) {
-    return 'echo \"No auto-approved non-breaking updates\"'
-  }
-
+function getNonBreakingUpdateCommand(packageManager: PackageManager, managerCommand: string): string {
   if (packageManager === 'pnpm') {
-    return `pnpm update ${targets.join(' ')}`
+    return `${managerCommand} update`
   }
   if (packageManager === 'yarn') {
-    return `yarn upgrade ${targets.join(' ')}`
+    return `${managerCommand} upgrade`
   }
-  return `npm update ${targets.join(' ')}`
+  return `${managerCommand} update`
 }
 
-function getManagerInstallCommand(packageManager: PackageManager): string {
-  if (packageManager === 'pnpm') return 'pnpm install'
-  if (packageManager === 'yarn') return 'yarn install'
-  return 'npm install'
+function getManagerInstallCommand(packageManager: PackageManager, managerCommand: string): string {
+  if (packageManager === 'pnpm') return `${managerCommand} install`
+  if (packageManager === 'yarn') return `${managerCommand} install`
+  return `${managerCommand} install`
 }
 
 function getManagerLockfile(packageManager: PackageManager): string {
@@ -375,22 +451,40 @@ function getManagerLockfile(packageManager: PackageManager): string {
   return 'package-lock.json'
 }
 
-function getManualReviewInstallCommand(packageManager: PackageManager, pkg: string): string {
-  if (packageManager === 'pnpm') return `pnpm add ${pkg}@latest`
-  if (packageManager === 'yarn') return `yarn add ${pkg}@latest`
-  return `npm install ${pkg}@latest`
+function getManualReviewInstallCommand(packageManager: PackageManager, managerCommand: string, pkg: string): string {
+  if (packageManager === 'pnpm') return `${managerCommand} add ${pkg}@latest`
+  if (packageManager === 'yarn') return `${managerCommand} add ${pkg}@latest`
+  return `${managerCommand} install ${pkg}@latest`
 }
 
-function getCleanUpdateSequenceCommand(packageManager: PackageManager, nonBreakingTargets: string[]): string {
-  const installCommand = getManagerInstallCommand(packageManager)
+function getCleanUpdateSequenceCommand(packageManager: PackageManager, managerCommand: string): string {
+  const installCommand = getManagerInstallCommand(packageManager, managerCommand)
   const lockfile = getManagerLockfile(packageManager)
-  const updateCommand = getNonBreakingUpdateCommand(packageManager, nonBreakingTargets)
+  const updateCommand = getNonBreakingUpdateCommand(packageManager, managerCommand)
   return `rm -rf node_modules ${lockfile}; ${installCommand}; ${updateCommand}; rm -rf node_modules ${lockfile}; ${installCommand};`
 }
 
 const TEST_SCRIPT_CANDIDATES = ['test', 'test:ci', 'test:unit', 'test:integration', 'test:all', 'verify', 'check']
 const LINT_SCRIPT_CANDIDATES = ['lint', 'lint:ci']
 const BUILD_SCRIPT_CANDIDATES = ['build', 'build:ci']
+const TEST_FILE_PATTERN = /\.(test|spec)\.[cm]?[jt]sx?$/
+const TEST_DIR_NAMES = new Set(['test', 'tests', '__tests__', '__mocks__'])
+const TEST_FRAMEWORK_PACKAGE_MAP: Record<string, TestFramework> = {
+  vitest: 'vitest',
+  jest: 'jest',
+  mocha: 'mocha',
+  ava: 'ava',
+  playwright: 'playwright',
+  '@playwright/test': 'playwright'
+}
+const TEST_FRAMEWORK_CONFIG_FILES: Record<TestFramework, string[]> = {
+  vitest: ['vitest.config.ts', 'vitest.config.js', 'vitest.config.mts', 'vitest.config.mjs', 'vitest.config.cts', 'vitest.config.cjs'],
+  jest: ['jest.config.ts', 'jest.config.js', 'jest.config.mts', 'jest.config.mjs', 'jest.config.cjs', 'jest.config.json'],
+  mocha: ['.mocharc', '.mocharc.json', '.mocharc.yml', '.mocharc.yaml', '.mocharc.js', '.mocharc.cjs'],
+  ava: ['ava.config.ts', 'ava.config.js', 'ava.config.mts', 'ava.config.mjs', 'ava.config.cjs'],
+  playwright: ['playwright.config.ts', 'playwright.config.js', 'playwright.config.mts', 'playwright.config.mjs', 'playwright.config.cjs']
+}
+const TEST_FRAMEWORK_PRIORITY: TestFramework[] = ['vitest', 'jest', 'mocha', 'playwright', 'ava']
 
 function pickScriptForStage(scripts: Record<string, unknown>, stage: ValidationStage): string | null {
   const candidates = stage === 'test'
@@ -405,6 +499,105 @@ function pickScriptForStage(scripts: Record<string, unknown>, stage: ValidationS
     }
   }
   return null
+}
+
+function detectFrameworksFromDependencies(packageJson: any): Set<TestFramework> {
+  const frameworks = new Set<TestFramework>()
+  const sections = [
+    packageJson?.dependencies || {},
+    packageJson?.devDependencies || {},
+    packageJson?.peerDependencies || {}
+  ]
+
+  for (const section of sections) {
+    for (const depName of Object.keys(section)) {
+      const framework = TEST_FRAMEWORK_PACKAGE_MAP[depName]
+      if (framework) {
+        frameworks.add(framework)
+      }
+    }
+  }
+
+  return frameworks
+}
+
+async function detectFrameworksFromConfigs(repoPath: string, packageDirs: string[]): Promise<Set<TestFramework>> {
+  const frameworks = new Set<TestFramework>()
+  const directories = ['.', ...packageDirs]
+
+  for (const relativeDir of directories) {
+    const basePath = relativeDir === '.' ? repoPath : path.join(repoPath, relativeDir)
+
+    for (const framework of Object.keys(TEST_FRAMEWORK_CONFIG_FILES) as TestFramework[]) {
+      for (const fileName of TEST_FRAMEWORK_CONFIG_FILES[framework]) {
+        if (await fileExists(path.join(basePath, fileName))) {
+          frameworks.add(framework)
+          break
+        }
+      }
+    }
+  }
+
+  return frameworks
+}
+
+async function hasTestArtifacts(repoPath: string, maxDepth = 7): Promise<boolean> {
+  const skipDirs = new Set(['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', 'out', '.turbo'])
+
+  const walk = async (absoluteDir: string, depth: number): Promise<boolean> => {
+    if (depth > maxDepth) return false
+
+    let entries: import('fs').Dirent[]
+    try {
+      entries = await fs.readdir(absoluteDir, { withFileTypes: true })
+    } catch {
+      return false
+    }
+
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (skipDirs.has(entry.name)) continue
+        if (TEST_DIR_NAMES.has(entry.name)) {
+          return true
+        }
+        if (await walk(path.join(absoluteDir, entry.name), depth + 1)) {
+          return true
+        }
+      } else if (entry.isFile()) {
+        if (TEST_FILE_PATTERN.test(entry.name)) {
+          return true
+        }
+      }
+    }
+
+    return false
+  }
+
+  return walk(repoPath, 0)
+}
+
+function getFrameworkTestCommand(
+  framework: TestFramework,
+  packageManager: PackageManager,
+  managerCommand: string
+): string {
+  const frameworkCommand = framework === 'vitest'
+    ? 'vitest run'
+    : framework === 'jest'
+      ? 'jest --runInBand'
+      : framework === 'mocha'
+        ? 'mocha'
+        : framework === 'playwright'
+          ? 'playwright test'
+          : 'ava'
+
+  if (packageManager === 'npm') {
+    return `npx --no-install ${frameworkCommand}`
+  }
+  if (packageManager === 'pnpm') {
+    return `${managerCommand} exec ${frameworkCommand}`
+  }
+  return `${managerCommand} ${frameworkCommand}`
 }
 
 function normalizePathForMatch(value: string): string {
@@ -496,6 +689,7 @@ async function getWorkspacePatterns(repoPath: string, packageJson: any): Promise
 async function resolveWorkspaceValidationSteps(
   repoPath: string,
   packageManager: PackageManager,
+  managerCommand: string,
   workspacePatterns: string[],
   rootHasStage: Record<ValidationStage, boolean>
 ): Promise<ValidationStep[]> {
@@ -535,7 +729,7 @@ async function resolveWorkspaceValidationSteps(
       if (!scriptName) {
         continue
       }
-      const command = getScriptCommand(packageManager, scriptName)
+      const command = getScriptCommand(packageManager, managerCommand, scriptName)
       const step: ValidationStep = {
         command,
         relativeCwd: relativeDir,
@@ -557,6 +751,7 @@ async function resolveWorkspaceValidationSteps(
 async function resolveNestedValidationSteps(
   repoPath: string,
   packageManager: PackageManager,
+  managerCommand: string,
   rootHasStage: Record<ValidationStage, boolean>
 ): Promise<ValidationStep[]> {
   const packageDirs = await collectPackageJsonDirectories(repoPath)
@@ -578,7 +773,7 @@ async function resolveNestedValidationSteps(
       if (rootHasStage[stage]) continue
       const scriptName = pickScriptForStage(scripts, stage)
       if (!scriptName) continue
-      const command = getScriptCommand(packageManager, scriptName)
+      const command = getScriptCommand(packageManager, managerCommand, scriptName)
       const step: ValidationStep = {
         command,
         relativeCwd: relativeDir,
@@ -609,6 +804,7 @@ async function resolveJavascriptValidationCommands(
   }
 
   const packageManager = await detectNodePackageManager(repoPath)
+  const managerCommand = await resolvePackageManagerCommand(repoPath, packageManager)
   const packageJsonPath = path.join(repoPath, 'package.json')
   if (!(await fileExists(packageJsonPath))) {
     return []
@@ -617,6 +813,7 @@ async function resolveJavascriptValidationCommands(
   const packageJsonRaw = await fs.readFile(packageJsonPath, 'utf-8')
   const packageJson = JSON.parse(packageJsonRaw)
   const scripts = (packageJson?.scripts || {}) as Record<string, unknown>
+  const packageDirs = await collectPackageJsonDirectories(repoPath)
 
   const stages: ValidationStage[] = ['test', 'lint', 'build']
   const rootScriptNames: Record<ValidationStage, string | null> = {
@@ -633,7 +830,7 @@ async function resolveJavascriptValidationCommands(
   const rootSteps: ValidationStep[] = stages
     .filter(stage => rootHasStage[stage])
     .map(stage => ({
-      command: getScriptCommand(packageManager, rootScriptNames[stage]!),
+      command: getScriptCommand(packageManager, managerCommand, rootScriptNames[stage]!),
       relativeCwd: '.',
       stage,
       label: `root (${rootScriptNames[stage]})`
@@ -644,16 +841,58 @@ async function resolveJavascriptValidationCommands(
     ? await resolveWorkspaceValidationSteps(
       repoPath,
       packageManager,
+      managerCommand,
       workspacePatterns,
       rootHasStage
     )
     : await resolveNestedValidationSteps(
       repoPath,
       packageManager,
+      managerCommand,
       rootHasStage
     )
+  const resolvedSteps = [...rootSteps, ...workspaceSteps]
+  const hasTestStep = resolvedSteps.some(step => step.stage === 'test')
 
-  return [...rootSteps, ...workspaceSteps]
+  if (!hasTestStep) {
+    const frameworkSignals = detectFrameworksFromDependencies(packageJson)
+    for (const relativeDir of packageDirs) {
+      const nestedPackageJsonPath = path.join(repoPath, relativeDir, 'package.json')
+      if (!(await fileExists(nestedPackageJsonPath))) {
+        continue
+      }
+      try {
+        const nestedPackageJson = JSON.parse(await fs.readFile(nestedPackageJsonPath, 'utf-8'))
+        detectFrameworksFromDependencies(nestedPackageJson).forEach(framework => frameworkSignals.add(framework))
+      } catch {
+        // Ignore invalid nested package.json files.
+      }
+    }
+
+    const configSignals = await detectFrameworksFromConfigs(repoPath, packageDirs)
+    configSignals.forEach(framework => frameworkSignals.add(framework))
+
+    const hasArtifacts = await hasTestArtifacts(repoPath)
+    const selectedFramework = TEST_FRAMEWORK_PRIORITY.find(framework => frameworkSignals.has(framework))
+
+    if (selectedFramework) {
+      resolvedSteps.unshift({
+        command: getFrameworkTestCommand(selectedFramework, packageManager, managerCommand),
+        relativeCwd: '.',
+        stage: 'test',
+        label: `detected-${selectedFramework}`
+      })
+    } else if (hasArtifacts) {
+      resolvedSteps.unshift({
+        command: 'node --test',
+        relativeCwd: '.',
+        stage: 'test',
+        label: 'detected-node-test-artifacts'
+      })
+    }
+  }
+
+  return resolvedSteps
 }
 
 async function runValidationSteps(
@@ -744,16 +983,10 @@ async function installDependenciesForValidation(
     }
 
     const manager = await detectNodePackageManager(targetPath)
-    let installCommand = 'npm install'
-    if (manager === 'npm') {
-      installCommand = await fileExists(path.join(targetPath, 'package-lock.json'))
-        ? 'npm ci'
-        : 'npm install'
-    } else if (manager === 'yarn') {
-      installCommand = 'yarn install'
-    } else if (manager === 'pnpm') {
-      installCommand = 'pnpm install'
-    }
+    const managerCommand = await resolvePackageManagerCommand(targetPath, manager)
+    const installCommand = manager === 'npm' && await fileExists(path.join(targetPath, 'package-lock.json'))
+      ? `${managerCommand} ci`
+      : getManagerInstallCommand(manager, managerCommand)
 
     onLog(`Installing baseline dependencies${relativeDir === '.' ? '' : ` in ${relativeDir}`}: ${installCommand}`)
     const { stdout, stderr } = await runCommand(installCommand, targetPath, {
@@ -796,11 +1029,13 @@ async function resolveBaseRef(
   onLog?: (message: string) => void
 ): Promise<string> {
   try {
+    onLog?.('Fetching latest refs from origin...')
     await execAsync('git fetch origin --prune', {
       cwd: repoPath,
       timeout: 120000,
       maxBuffer: DEFAULT_MAX_BUFFER
     })
+    onLog?.('Fetched latest refs from origin.')
   } catch (error) {
     onLog?.(`WARN: Unable to fetch origin before update. Falling back to local refs (${formatError(error, 'fetch failed')}).`)
   }
@@ -830,6 +1065,16 @@ async function resolveBaseRef(
 
   for (const candidate of uniqueCandidates) {
     if (await gitRefExists(repoPath, candidate)) {
+      try {
+        const { stdout } = await execAsync(`git rev-parse --short "${candidate}"`, {
+          cwd: repoPath,
+          timeout: 30000
+        })
+        const sha = stdout.trim()
+        if (sha) {
+          onLog?.(`Using base ref ${candidate} @ ${sha}.`)
+        }
+      } catch {}
       return candidate
     }
   }
@@ -1704,7 +1949,7 @@ export async function runNonBreakingUpdatePipeline(
     onLog('Local repository changes are left untouched.')
 
     if (await fileExists(path.join(workspacePath, '.npmrc'))) {
-      onLog('Using repository-local .npmrc for npm commands.')
+      onLog('Using repository-local .npmrc for package manager commands.')
     } else {
       onWarning({
         message: 'No repository .npmrc found. Falling back to global npm config.',
@@ -1738,6 +1983,16 @@ export async function runNonBreakingUpdatePipeline(
         baselineValidationFailed = true
         baselineValidationOutput = baselineValidation.output
         const summary = extractFailureSummary(baselineValidation.output) || 'unknown failure'
+        const environmentIssue = detectValidationEnvironmentIssue(baselineValidation.output)
+        if (environmentIssue) {
+          return fail(
+            `Baseline validation could not run due to repository/tooling setup: ${environmentIssue}. Bridge stopped before applying updates.`,
+            {
+              testsPassed: false,
+              testOutput: baselineValidation.output
+            }
+          )
+        }
         onWarning({
           message: `Baseline validation failed at ${baselineValidation.failedCommand || 'unknown step'} (${summary}). Bridge will continue and require no regression after updates.`,
           output: ''
@@ -1754,9 +2009,10 @@ export async function runNonBreakingUpdatePipeline(
 
     onProgress('Running non-breaking update sequence...', ++currentStep, totalSteps)
     onLog('[2/5] Running update script:')
-    const nonBreakingTargets = nonBreakingBefore.map(pkg => pkg.name)
     const packageManager = await detectNodePackageManager(workspacePath)
-    const updateSequence = getCleanUpdateSequenceCommand(packageManager, nonBreakingTargets)
+    const packageManagerCommand = await resolvePackageManagerCommand(workspacePath, packageManager)
+    onLog(`Detected package manager: ${packageManager} (${packageManagerCommand}).`)
+    const updateSequence = getCleanUpdateSequenceCommand(packageManager, packageManagerCommand)
     onLog(updateSequence)
     try {
       const { stdout, stderr } = await runCommand(
@@ -1780,7 +2036,7 @@ export async function runNonBreakingUpdatePipeline(
       onLog('[3/5] Applying selected manual review updates...')
       for (const pkg of manualReviewPackages) {
         try {
-          const installCommand = getManualReviewInstallCommand(packageManager, pkg)
+          const installCommand = getManualReviewInstallCommand(packageManager, packageManagerCommand, pkg)
           onLog(`> ${installCommand}`)
           const { stdout, stderr } = await runCommand(installCommand, workspacePath, {
             timeout: DEFAULT_TEST_TIMEOUT_MS,
@@ -1812,6 +2068,14 @@ export async function runNonBreakingUpdatePipeline(
     onProgress('Evaluating changes...', ++currentStep, totalSteps)
     const changed = await hasGitChanges(workspacePath)
     if (!changed) {
+      const nonBreakingBeforeCount = nonBreakingBefore.length
+      const nonBreakingAfterCount = remainingNonBreaking.size
+      onLog(
+        `No git-tracked dependency changes detected. Non-breaking candidates before: ${nonBreakingBeforeCount}, remaining after: ${nonBreakingAfterCount}.`
+      )
+      onLog(
+        'Likely causes: lockfile already at latest allowed versions, or local node_modules was stale when the outdated list was generated.'
+      )
       return fail('No dependency changes were produced by the update process.')
     }
 
